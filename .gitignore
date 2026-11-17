@@ -1,0 +1,20 @@
+# Credentials and secrets — never commit these.
+config.json
+config.*.json
+!config.example.json
+accounts.json
+*.env
+
+# Runtime output.
+logs/
+*.log
+requests.jsonl
+
+# Python build artefacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/

@@ -1,0 +1,15 @@
+{
+  "model": "<defaults to the agent's configured model>",
+  "host": "127.0.0.1",
+  "port": 8787,
+  "api_key": "<optional; clients must send it when set>",
+  "panel_password": "<optional; without it the panel is only reachable from localhost>",
+  "fingerprint": "edge-157",
+  "send_origin": true,
+  "min_interval_ms": 800,
+  "jitter_ms": 700,
+  "sanitize_scope": "all",
+  "accounts_file": "accounts.json",
+  "archive_file": "logs/requests.jsonl",
+  "log_dir": "logs"
+}

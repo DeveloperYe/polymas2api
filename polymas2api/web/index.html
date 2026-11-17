@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>polymas2api 控制台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6bff'/%3E%3Ctext x='16' y='22' font-family='sans-serif' font-size='18' font-weight='700' fill='white' text-anchor='middle'%3EP%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/panel/style.css">
+<script src="/panel/theme.js"></script>
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">
+    <span class="logo">P</span>
+    <span class="name">polymas2api</span>
+    <span class="sep"></span>
+    <span class="status" id="status"><span class="dot"></span><span id="status-text">连接中</span></span>
+    <span class="sep"></span>
+    <span class="meta mono" id="app-code">—</span>
+    <span class="meta" id="agent-name"></span>
+  </div>
+  <div class="bar-actions">
+    <input id="key" type="password" placeholder="面板口令" autocomplete="off" spellcheck="false">
+    <button id="save-key" class="ghost">连接</button>
+    <button id="refresh" class="ghost icon" title="刷新" aria-label="刷新">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+        <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2v3h-3"/>
+      </svg>
+    </button>
+    <button id="theme-toggle" class="ghost icon" title="切换主题" aria-label="切换主题">
+      <svg id="theme-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="8" cy="8" r="3.2"/>
+        <path d="M8 1.4v1.4M8 13.2v1.4M14.6 8h-1.4M2.8 8H1.4M12.7 3.3l-1 1M4.3 11.7l-1 1M12.7 12.7l-1-1M4.3 4.3l-1-1"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="overview">总览</button>
+  <button class="tab" data-tab="accounts">账号池</button>
+  <button class="tab" data-tab="requests">请求日志</button>
+  <button class="tab" data-tab="errors">错误汇总</button>
+  <button class="tab" data-tab="settings">设置</button>
+</nav>
+
+<main>
+  <!-- Shown until a key is entered; the panel has nothing to display without one. -->
+  <div id="gate" class="gate">
+    <div class="gate-card">
+      <h2>需要面板口令</h2>
+      <p class="muted small">在右上角填入口令（默认与 API Key 相同），点「连接」即可进入控制台。</p>
+    </div>
+  </div>
+
+  <!-- 总览 -->
+  <section id="tab-overview" class="tab-panel active">
+    <div class="metrics" id="metrics"></div>
+
+    <div class="grid">
+      <div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>模型</h2>
+            <span class="sub" id="model-sub"></span>
+            <button id="refresh-models" class="ghost small" title="重新从上游拉取模型目录">重新获取</button>
+          </div>
+          <div class="panel-body flush">
+            <table id="models">
+              <thead><tr>
+                <th>modelCode</th><th>别名</th><th>档位</th><th>来源</th><th class="num">默认</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="panel-body model-note">
+            <p class="hint-line" id="model-note"></p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>账号池</h2><span class="sub" id="pool-summary"></span></div>
+          <div class="panel-body flush">
+            <table id="accounts-mini">
+              <thead><tr><th>账号</th><th class="num">调用</th><th class="num">失败</th><th>状态</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>出站指纹</h2>
+            <span class="sub">上游看到的请求形态</span>
+          </div>
+          <div class="panel-body">
+            <dl class="kv" id="fingerprint"></dl>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>接入信息</h2></div>
+          <div class="panel-body">
+            <dl class="kv" id="endpoint"></dl>
+            <div class="actions actions-tight">
+              <button id="copy-base" class="ghost">复制 Base URL</button>
+              <span class="muted small" id="copy-state"></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>近期活动</h2><span class="sub" id="recent-sub"></span></div>
+          <div class="panel-body flush">
+            <table id="recent">
+              <thead><tr><th>时间</th><th>模型</th><th class="num">耗时</th><th>结果</th><th>工具</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 账号池 -->
+  <section id="tab-accounts" class="tab-panel">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>账号池</h2>
+        <span class="sub" id="pool-stats"></span>
+        <button id="open-add-account" class="primary small">＋ 添加账号</button>
+      </div>
+      <div class="panel-body">
+        <p class="hint-line">
+          按权重轮换。失败的账号会被隔离一段时间，避免一个失效 cookie 拖垮整个网关；
+          隔离中的账号仍会在必要时兜底启用。
+        </p>
+      </div>
+      <div class="panel-body flush">
+        <table id="accounts">
+          <thead><tr>
+            <th>uid</th><th>label</th><th>凭据</th><th class="num">权重</th>
+            <th class="num">调用</th><th class="num">失败</th><th>最近使用</th><th>状态</th><th></th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>凭据与续期</h2>
+        <span class="sub" id="renew-summary"></span>
+      </div>
+      <div class="panel-body">
+        <p class="hint-line">
+          每个账号用自己的 ai-poly 独立续期，走 <code>/oauth/token/getToken</code>；
+          只有新 token 通过校验才会装上去，失败时保留旧 token 且只影响该账号。
+        </p>
+      </div>
+      <div class="panel-body flush">
+        <table id="credentials">
+          <thead><tr>
+            <th>账号</th><th>凭据</th><th>状态</th><th>上次续期</th>
+            <th class="num">续期次数</th><th>最近错误</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="panel-body panel-divider">
+        <div class="row">
+          <button id="renew-now">立即续期</button>
+          <span class="muted small" id="renew-info"></span>
+        </div>
+      </div>
+    </div>
+
+    <dialog id="add-account-dialog">
+      <div class="dialog-head">
+        <h2>添加账号</h2>
+        <button id="close-add-account" class="ghost small" title="关闭">✕</button>
+      </div>
+      <div class="dialog-body">
+        <div class="field">
+          <label for="new-ai-poly">ai-poly</label>
+          <textarea id="new-ai-poly" rows="3" spellcheck="false"
+                    placeholder="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9..."></textarea>
+          <div class="hint">
+            粘贴后自动校验。通过并确认添加时，网关会在这个账号下
+            <strong>自动新建一个通用助手</strong>，并把该助手作为上游使用 ——
+            不用再去平台网页上手动创建。userNid 会从这串 JWT 里自动解出来。
+          </div>
+        </div>
+        <div id="verify-state" class="verify-state"></div>
+
+      </div>
+      <div class="dialog-actions">
+        <button id="cancel-add-account" class="ghost">取消</button>
+        <button id="confirm-add-account" class="primary" disabled>确认添加</button>
+      </div>
+    </dialog>
+  </section>
+
+  <!-- 请求日志 -->
+  <section id="tab-requests" class="tab-panel">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>请求日志</h2>
+        <span class="sub" id="journal-stats"></span>
+      </div>
+      <div class="panel-body">
+        <p class="hint-line">只记录元数据（账号 / 模型 / 耗时 / 字节数），默认不落盘提示词与回答正文。</p>
+      </div>
+      <div class="panel-body flush">
+        <table id="journal">
+          <thead><tr>
+            <th>时间</th><th>账号</th><th>模型</th><th>流式</th>
+            <th class="num">耗时</th><th class="num">输入字</th><th class="num">输出字</th>
+            <th class="num">入 tok</th><th class="num">出 tok</th><th>结果</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- 错误汇总 -->
+  <section id="tab-errors" class="tab-panel">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>错误汇总</h2>
+        <span class="sub" id="errors-stats"></span>
+      </div>
+      <div class="panel-body">
+        <p class="hint-line">按错误内容聚合，便于看出故障模式（凭据失效、网络抖动、上游异常）。</p>
+      </div>
+      <div class="panel-body flush">
+        <table id="errors">
+          <thead><tr>
+            <th>错误</th><th class="num">次数</th><th>最近</th><th>账号</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- 设置 -->
+  <section id="tab-settings" class="tab-panel">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>运行参数</h2>
+        <span class="sub">保存后立即生效并写回 config.json</span>
+      </div>
+      <div class="panel-body">
+        <div class="settings" id="settings"></div>
+        <div class="actions">
+          <button id="save-settings" class="primary">保存设置</button>
+          <span class="muted small" id="save-state"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>链路自检</h2></div>
+      <div class="panel-body">
+        <p class="hint-line">用当前凭据向上游取一次模型目录，验证链路是否通畅。</p>
+        <div class="row">
+          <button id="check-upstream">检查上游</button>
+        </div>
+        <pre id="check-output" class="output"></pre>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="/panel/app.js"></script>
+</body>
+</html>

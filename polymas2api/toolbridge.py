@@ -1,0 +1,682 @@
+"""Make a chat-only upstream behave like a tool-calling model.
+
+Why a bridge is needed
+======================
+
+The platform assistant *does* have tools, but they belong to the agent and
+run on the server (``bindTools`` / ``toolPrompts`` in its configuration, and
+``/llmOps/agent/v1/ability-config/*`` on the teacher side). A chat request
+carries no tool definitions and the platform will not accept any, so a
+client cannot hand the model its own tools.
+
+The one thing the client *can* do is talk to the model. So the tools are
+described in the prompt: the model is told which tools exist and how to hand
+a call back, and its answer is parsed into the OpenAI ``tool_calls`` shape.
+
+Why the marker is *not* a "tool call"
+=====================================
+
+The first version asked for a ```` ```tool_call ```` block. The assistant
+refused, and its refusals explain exactly why::
+
+    输出一个假的工具调用块等于冒充系统动作，可能触发不该执行的逻辑，我不会生成。
+    我不会用 tool_call 这个语言标记输出——那个标记的含义就是"正在调用工具"，
+    而这里并不是，标上去就是伪造一次工具调用。
+
+So the request is framed as what it actually is: the assistant produces
+**parameters for the caller to execute**. The marker is a plain line —
+``CALL <name> <json>`` — which claims nothing about execution. Verified
+2026-11-16: every neutral format is produced correctly, the ``tool_call``
+fence is not.
+
+Wire protocol
+=============
+
+On its own line, at the end of the answer::
+
+    CALL get_weather {"city": "北京"}
+
+Everything before that line stays as the message content.
+
+What the parser also accepts
+============================
+
+The upstream is a course assistant, not a general model, so the parser is
+tolerant. In order of preference:
+
+1. a ``CALL <name> <json>`` line;
+2. a ```` ```tool_call ```` block (other agents and models do produce it);
+3. a fenced block whose body is ``{"action"|"name": …, "input"|"arguments": …}``;
+4. a bare object with both a name-like and an argument-like key.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+__all__ = [
+    "CALL_MARKER",
+    "ToolCall",
+    "ToolCallParser",
+    "ToolCallStream",
+    "align_call_names",
+    "build_tool_prompt",
+    "declared_names",
+    "parse_tool_calls",
+    "render_tool_result",
+]
+
+#: The line prefix the model is asked to use.
+CALL_MARKER = "CALL"
+
+#: Tells the model to ignore the toolbelt the *agent* ships with.
+#:
+#: The agent always has its own tools (执行命令 / 读取文件 / 查看文件列表 /
+#: 查询当前时间 / 询问用户 / 转接计划专员 …) and they run server-side, inside
+#: the platform's container. Measured 2026-11-17: asked to "read your working
+#: directory", the assistant called 查看文件列表 six times and 执行命令 twice
+#: and never emitted a CALL line — so the caller saw no tool call at all, and
+#: the answer described an empty container instead of the caller's machine.
+#: ``configMsg.useAgent = 0`` does **not** turn them off (measured twice).
+#:
+#: With this line in the prompt the same questions produced **zero** native
+#: calls and a correct ``CALL pwsh`` instead.
+_NATIVE_TOOL_BAN = (
+    "8. **不要使用你自己附带的任何工具**（例如「执行命令」「读取文件」"
+    "「查看文件列表」「查询当前时间」「询问用户」「转接计划专员」"
+    "「内容搜索」「联网搜索」「网页搜索」等）。"
+    "它们运行在平台侧容器里，看不到用户的本机环境，结果对用户没有意义。"
+    "需要执行任何操作时，只能按上面的格式输出 CALL 行，交给外部程序去做。"
+)
+
+#: Names/descriptions that mean "this caller tool searches the web".
+_SEARCH_TOOL_RE = re.compile(
+    r"web[_-]?search|search[_-]?web|searxng|tavily|brave|serp|duckduckgo|bing|google"
+    r"|web[_-]?fetch|fetch[_-]?web|url[_-]?fetch|fetch[_-]?url|read[_-]?url",
+    re.I)
+
+
+def _search_tool_names(specs: Sequence[Dict[str, Any]]) -> List[str]:
+    """The caller's web-search tools, by the name the model should emit.
+
+    Matched on the declared name or on a 搜索/检索 description, so a client
+    that names it ``mcp__searxng__search`` or 「联网搜索」 is still found.
+    """
+    names: List[str] = []
+    for spec in specs:
+        name = spec["name"]
+        description = spec["description"] or ""
+        if (_SEARCH_TOOL_RE.search(name)
+                or "搜索" in description or "检索" in description):
+            names.append(spec["emit_name"])
+    return names
+
+
+#: Names other implementations (and other agents) use for the same thing.
+_NAME_KEYS = ("name", "action", "tool", "function", "tool_name", "function_name")
+_ARG_KEYS = ("arguments", "args", "input", "parameters", "params", "argument")
+
+#: A tool name: anything but whitespace, braces, brackets, quotes or the
+#: punctuation that could end it.
+#:
+#: It must **not** be ASCII-only. This agent's own tools are Chinese words
+#: (``执行命令``, ``读取文件``, ``查询当前时间``) and a caller that declares a
+#: tool under such a name gets it echoed back verbatim — an ASCII pattern
+#: silently leaves the CALL line in the answer, the client sees no
+#: ``tool_calls``, and nothing runs. Caught 2026-11-16.
+_NAME_CHARS = r'[^\s{}()\[\]"' + "'" + r'，,：:、。！？]+'
+
+#: ``CALL get_weather {"city":"北京"}`` — the documented form.
+_CALL_LINE_RE = re.compile(
+    r"^[ \t>*\-]*(?:" + CALL_MARKER + r"[ \t]*[:：]?[ \t]*)"
+    r"(" + _NAME_CHARS + r")[ \t]*(\{[^\n]*\})?[ \t]*$",
+    re.MULTILINE,
+)
+#: A quoted name: ``CALL <执行命令> {...}`` or ``CALL 「执行命令」 {...}``.
+_CALL_LINE_QUOTED_RE = re.compile(
+    r"^[ \t>*\-]*(?:" + CALL_MARKER + r"[ \t]*[:：]?[ \t]*)"
+    r"[<「【\[]([^\s<>\[\]「」【】]+)[>」】\]][ \t]*(\{[^\n]*\})?[ \t]*$",
+    re.MULTILINE,
+)
+_FENCE_RE = re.compile(r"```[ \t]*[A-Za-z0-9_+-]*[ \t]*\r?\n(.*?)```", re.DOTALL)
+
+
+@dataclass
+class ToolCall:
+    """One call the model asked for."""
+
+    name: str
+    arguments: str  # JSON text, as OpenAI wants it
+    id: str = ""
+    raw_arguments: Dict[str, Any] = field(default_factory=dict)
+
+    def to_openai(self, index: int = 0) -> Dict[str, Any]:
+        return {
+            "index": index,
+            "id": self.id,
+            "type": "function",
+            "function": {"name": self.name, "arguments": self.arguments},
+        }
+
+
+def _arguments_text(value: Any) -> str:
+    """OpenAI sends ``arguments`` as a JSON *string*, not an object."""
+    if isinstance(value, str):
+        try:
+            json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return json.dumps({"value": value}, ensure_ascii=False)
+        return value
+    if value is None:
+        return "{}"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _loads(text: str) -> Any:
+    try:
+        return json.loads(text.strip())
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return None
+
+
+def _from_object(payload: Any) -> Optional[ToolCall]:
+    """Build a call from a decoded object, if it looks like one.
+
+    A name-like key **and** an argument-like key are both required, so an
+    ordinary data answer such as ``{"name": "张三", "score": 90}`` is not
+    mistaken for a call.
+    """
+    if not isinstance(payload, dict):
+        return None
+    name = None
+    for key in _NAME_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            name = value.strip()
+            break
+        if isinstance(value, dict):  # {"function": {"name":..,"arguments":..}}
+            nested = value.get("name")
+            if isinstance(nested, str) and nested.strip():
+                name = nested.strip()
+                return ToolCall(
+                    name=name,
+                    arguments=_arguments_text(value.get("arguments")),
+                    id=str(payload.get("id") or ""),
+                    raw_arguments=value.get("arguments")
+                    if isinstance(value.get("arguments"), dict) else {},
+                )
+    if not name:
+        return None
+    for key in _ARG_KEYS:
+        if key in payload:
+            arguments = payload[key]
+            return ToolCall(
+                name=name,
+                arguments=_arguments_text(arguments),
+                id=str(payload.get("id") or ""),
+                raw_arguments=arguments if isinstance(arguments, dict) else {},
+            )
+    return None
+
+
+def _json_objects(text: str) -> List[Any]:
+    found: List[Any] = []
+    decoder = json.JSONDecoder()
+    index = 0
+    while index < len(text):
+        start = text.find("{", index)
+        if start < 0:
+            break
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        found.append(value)
+        index = end
+    return found
+
+
+#: A fence that has become empty after its CALL line was removed —
+#: ```` ``` ````, ```` ```json ````, or the same across two lines.
+_EMPTY_FENCE_RE = re.compile(r"```[A-Za-z0-9_+.\-]*[ \t]*\n?[ \t]*\n?```")
+
+#: A CALL line the model wrapped in single backticks. Unwrapped before
+#: matching so it is not left sitting in the answer as inline code.
+_INLINE_CODE_CALL_RE = re.compile(r"`(CALL\s[^`\n]+)`")
+
+
+def parse_tool_calls(text: str) -> Tuple[str, List[ToolCall]]:
+    """Split an answer into ``(content, calls)``."""
+    if not text:
+        return "", []
+
+    text = _INLINE_CODE_CALL_RE.sub(r"\1", text)
+
+    # 1. The documented ``CALL name {json}`` line.
+    calls: List[ToolCall] = []
+    # Quoted first: ``<名称>`` and ``「名称」`` must not keep their brackets.
+    for regex in (_CALL_LINE_QUOTED_RE, _CALL_LINE_RE):
+        for match in regex.finditer(text):
+            arguments = match.group(2)
+            if not arguments:
+                continue
+            payload = _loads(arguments)
+            if payload is None:
+                continue
+            calls.append(ToolCall(
+                name=match.group(1),
+                arguments=_arguments_text(payload),
+                raw_arguments=payload if isinstance(payload, dict) else {},
+            ))
+        if calls:
+            remaining = text
+            for regex in (_CALL_LINE_QUOTED_RE, _CALL_LINE_RE):
+                remaining = regex.sub("", remaining)
+            # The model is told not to wrap the line in a fence (rule 3) but
+            # sometimes does anyway. Removing the line then leaves an empty
+            # pair of fences behind, and the client renders that as a stray
+            # code block in the middle of the answer (reported 2026-11-17).
+            remaining = _EMPTY_FENCE_RE.sub("", remaining)
+            return _tidy(remaining), _assign_ids(calls)
+
+    # 2. A fenced block holding a call, whatever the fence tag says.
+    for match in _FENCE_RE.finditer(text):
+        call = _from_object(_loads(match.group(1)))
+        if call is not None:
+            calls.append(call)
+    if calls:
+        return _tidy(_FENCE_RE.sub("", text)), _assign_ids(calls)
+
+    # 3. A bare object, only when it is essentially the whole answer.
+    stripped = text.strip()
+    for candidate in _json_objects(stripped):
+        call = _from_object(candidate)
+        if call is not None:
+            spans = json.dumps(candidate, ensure_ascii=False)
+            remaining = stripped.replace(spans, "")
+            if len(remaining) > len(stripped) * 0.5:
+                continue  # too much other text: this is data, not a call
+            return _tidy(remaining), _assign_ids([call])
+    return _tidy(text), []
+
+
+def _tidy(text: str) -> str:
+    """Collapse the blank space a removed line leaves behind."""
+    lines = [line.rstrip() for line in text.split("\n")]
+    cleaned: List[str] = []
+    for line in lines:
+        if not line and cleaned and not cleaned[-1]:
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
+
+
+def _assign_ids(calls: Sequence[ToolCall]) -> List[ToolCall]:
+    for index, call in enumerate(calls, start=1):
+        if not call.id:
+            call.id = f"call_{index:04d}"
+    return list(calls)
+
+
+class ToolCallParser:
+    """Stateful driver, so a stream can be parsed as it arrives.
+
+    A ``CALL`` line can straddle two upstream frames, so the tail is held
+    back until it can no longer be the start of one.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+
+    def feed(self, chunk: str) -> str:
+        """Take a fragment, return the part that is definitely plain text."""
+        self._buffer += chunk
+        # Hold back from the last line start that could still become a CALL.
+        index = self._call_start()
+        if index < 0:
+            keep = len(CALL_MARKER) + 1
+            if len(self._buffer) <= keep:
+                return ""
+            emit = self._buffer[:-keep]
+            self._buffer = self._buffer[-keep:]
+            return emit
+        emit = self._buffer[:index]
+        self._buffer = self._buffer[index:]
+        return emit
+
+    def _call_start(self) -> int:
+        """Index of a complete ``CALL`` marker at the start of a line."""
+        # No ``\b`` here: between "CALL" and a Chinese name both sides are
+        # word characters, so ``\b`` never matches.
+        pattern = re.compile(r"(?:^|\n)[ \t>*\-]*" + CALL_MARKER + r"(?=[\s:：])")
+        match = pattern.search(self._buffer)
+        if match:
+            return match.start() + (1 if self._buffer[match.start()] in "\r\n" else 0)
+        return -1
+
+    def flush(self) -> Tuple[str, List[ToolCall]]:
+        """Release what is left and parse any call in it."""
+        rest = self._buffer
+        self._buffer = ""
+        if not rest.strip():
+            return "", []
+        return parse_tool_calls(rest)
+
+
+class ToolCallStream:
+    """Wraps a text stream so call lines never leak into the content."""
+
+    def __init__(self, enabled: bool = True) -> None:
+        self.enabled = enabled
+        self._parser = ToolCallParser() if enabled else None
+
+    def feed(self, text: str) -> str:
+        if not self.enabled or self._parser is None:
+            return text
+        return self._parser.feed(text)
+
+    def flush(self) -> Tuple[str, List[ToolCall]]:
+        if not self.enabled or self._parser is None:
+            return "", []
+        return self._parser.flush()
+
+
+#: A tool name that a strict OpenAI client will accept.
+_ASCII_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]*$")
+
+
+#: How much room the tool block may take before the schemas are compacted.
+#:
+#: A real agent client sends ~112 tools; rendering their schemas verbatim
+#: produced a 109,634-character instruction block, and with that in the
+#: prompt the assistant would *say* "I will send you a card" and never emit
+#: the call (measured 2026-11-16). Compacting keeps the instructions close
+#: enough to the question to be obeyed.
+TOOL_BLOCK_BUDGET = 8000
+
+
+def _one_line(text: str, limit: int = 100) -> str:
+    """First sentence of a description, on one line, capped."""
+    flat = " ".join(str(text or "").split())
+    for stop in ("。", ". ", "；", "; "):
+        cut = flat.find(stop)
+        if 0 < cut < limit:
+            flat = flat[:cut + 1]
+            break
+    if len(flat) > limit:
+        flat = flat[:limit].rstrip() + "…"
+    return flat
+
+
+#: How many levels of nested parameters to spell out.
+#:
+#: Measured 2026-11-17 against DSH's 112 declared tools:
+#:
+#:     depth 0 (flat)   17,186 chars      — the old behaviour
+#:     depth 1          18,232 chars  (+6%)
+#:     depth 2          18,423 chars  (+7%)
+#:     depth 3 / full   18,423 chars  (+7%)
+#:
+#: Nothing in that set nests deeper than two levels, so depth 2 already shows
+#: everything at 7% of the cost. Depth 0 was the wrong default for a different
+#: reason than size: a tool like ``ask_user_question`` rendered as
+#: ``questions:array<object>`` hides ``id``/``question`` entirely, leaving the
+#: model to guess the inner shape.
+SCHEMA_DEPTH = 2
+
+
+def _compact_parameters(schema: Any, depth: int = SCHEMA_DEPTH,
+                        level: int = 0) -> str:
+    """A ``name:type`` signature, nested up to ``depth`` levels.
+
+    Deep enough to show the fields a caller actually has to fill in, shallow
+    enough that the whole block stays around 18K characters for 112 tools —
+    rendering every subschema in full is what made it unusable (113K).
+    """
+    if not isinstance(schema, dict):
+        return ""
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return "无参数"
+    required = set(schema.get("required") or [])
+    parts: List[str] = []
+    for key, spec in properties.items():
+        kind = ""
+        inner_block = ""
+        if isinstance(spec, dict):
+            kind = str(spec.get("type") or ("object" if "properties" in spec else ""))
+            if kind == "array":
+                items = spec.get("items")
+                inner = ""
+                if isinstance(items, dict):
+                    inner = str(items.get("type") or (
+                        "object" if "properties" in items else ""))
+                    # The interesting case: an array of records. Show the
+                    # record's own fields rather than a bare ``array<object>``.
+                    if level < depth and isinstance(items.get("properties"), dict):
+                        inner_block = _compact_parameters(items, depth, level + 1)
+                kind = f"array<{inner}>" if inner else "array"
+                if inner_block == "无参数":
+                    inner_block = ""
+            elif level < depth and isinstance(spec.get("properties"), dict):
+                inner_block = _compact_parameters(spec, depth, level + 1)
+                if inner_block == "无参数":
+                    inner_block = ""
+        entry = f"{key}:{kind or 'any'}" + ("*" if key in required else "")
+        if inner_block:
+            entry += "{" + inner_block + "}"
+        parts.append(entry)
+    return " ".join(parts)
+
+def ascii_alias(name: str, index: int) -> str:
+    """A deterministic ASCII stand-in for a non-ASCII tool name.
+
+    OpenAI requires ``^[a-zA-Z0-9_-]{1,64}$``, so a name like ``执行命令``
+    cannot travel on the wire without upsetting strict clients. The alias is
+    derived from a small table of the agent's own tools — which is what a
+    caller mirroring them will usually declare — and falls back to a
+    positional name.
+    """
+    known = {
+        "执行命令": "run_command",
+        "读取文件": "read_file",
+        "写入文件": "write_file",
+        "查询当前时间": "get_current_time",
+        "电子工艺实习": "search_course_kb",
+        "网页搜索": "web_search",
+        "生成图片": "generate_image",
+    }
+    if name in known:
+        return known[name]
+    cleaned = re.sub(r"[^a-z0-9_]+", "_", name.lower()).strip("_")
+    if cleaned and _ASCII_NAME_RE.match(cleaned):
+        return cleaned
+    return f"tool_{index}"
+
+
+def build_tool_prompt(tools: Sequence[Dict[str, Any]],
+                      tool_choice: Any = None,
+                      name_style: str = "verbatim",
+                      schema_depth: int = SCHEMA_DEPTH,
+                      ) -> Tuple[str, Dict[str, str]]:
+    """Describe the caller's tools to the model.
+
+    The framing matters: the assistant refuses to *claim* it is calling a
+    tool, so it is asked to produce the parameters for someone else to
+    execute.
+
+    Returns ``(prompt, aliases)`` where ``aliases`` maps the name the model
+    was told to use onto the name the caller declared. With
+    ``name_style="verbatim"`` the two are the same and the map is empty;
+    with ``"ascii"`` a non-ASCII name is replaced by an ASCII stand-in, so
+    the wire format stays valid for strict OpenAI clients.
+
+    Returns an empty prompt when there is nothing to say, so a request
+    without tools is byte-identical to one made before this existed.
+    """
+    if _choice_mode(tool_choice) == "none":
+        return "", {}
+    specs = [_normalise_tool(tool) for tool in tools or []]
+    specs = [spec for spec in specs if spec]
+    if not specs:
+        return "", {}
+
+    # Decide what name the model is asked to emit.
+    aliases: Dict[str, str] = {}
+    for index, spec in enumerate(specs, start=1):
+        declared = spec["name"]
+        if name_style == "ascii" and not _ASCII_NAME_RE.match(declared):
+            alias = ascii_alias(declared, index)
+            spec["emit_name"] = alias
+            aliases[alias] = declared
+        else:
+            spec["emit_name"] = declared
+
+    # Render the tool list two ways and keep whichever fits the budget: a
+    # 112-tool client produced a 110 KB block, and the assistant stopped
+    # obeying it.
+    def render(compact: bool) -> List[str]:
+        out: List[str] = []
+        for spec in specs:
+            description = (spec["description"] or "（无说明）")
+            if compact:
+                out.append(f"- {spec['emit_name']}：{_one_line(description)}")
+                out.append("  参数：" + _compact_parameters(
+                    spec.get("parameters"), schema_depth))
+            else:
+                out.append(f"- {spec['emit_name']}：{description}")
+                out.append("  参数：" + json.dumps(
+                    spec.get("parameters") or {}, ensure_ascii=False,
+                    separators=(",", ":")))
+            out.append("")
+        return out
+
+    full = render(compact=False)
+
+    lines: List[str] = [
+        "[调用参数整理]",
+        "你的回答会由一个外部程序读取。当用户的请求需要下面这些能力时，",
+        "不要自己编造结果，也不要解释，而是在回复最后单独用一行给出调用参数，",
+        "由那个程序去真正执行：",
+        "",
+        "CALL 工具名 {\"参数名\": \"参数值\"}",
+        "",
+        "可用工具：",
+    ]
+    body_render = full if sum(len(x) for x in full) <= TOOL_BLOCK_BUDGET else render(True)
+    lines.extend(body_render)
+
+    lines.extend([
+        "要求：",
+        "1. 这一行以 CALL 加空格开头，后面是工具名和一段单行 JSON。",
+        "2. 参数必须符合上面给出的结构，JSON 用双引号。",
+        "3. 这一行放在回复最后；它不需要代码块包裹，也不要加引号或其它标记。",
+        "4. 如果一次需要多个工具，只给出最需要先执行的那一个。",
+        "5. 不需要任何工具时，正常回答，不要输出 CALL 行。",
+        "6. 调用参数由外部程序执行，你把参数整理正确即可。",
+        "7. 工具名**必须逐字照抄**上面列出的那个名字：不要翻译、不要改写成别的",
+        "   语言、不要加引号或尖括号。它会原样传给外部程序，写错就找不到工具。",
+        _NATIVE_TOOL_BAN,
+    ])
+    number = 9
+    search_tools = _search_tool_names(specs)
+    if search_tools:
+        # Measured 2026-11-18: without this the assistant either searched with
+        # its own 内容搜索 or handed the caller a curl one-liner. Naming the
+        # caller's tool explicitly is what makes it delegate instead.
+        lines.append(
+            f"{number}. **需要联网检索或抓取网页时，只能用上面列出的 "
+            + "、".join(search_tools)
+            + " 发 CALL**，由外部程序去联网。不要用你自己内置的搜索，"
+            "也不要把网址、curl、wget、Invoke-WebRequest、Invoke-RestMethod "
+            "写进任何命令里让外部程序代抓。")
+        number += 1
+    if name_style == "ascii" or all(
+            _ASCII_NAME_RE.match(spec["emit_name"]) for spec in specs):
+        lines.append(f"{number}. 上面的工具名是英文标识符，即使你的回答用中文，"
+                     "工具名也保持英文。")
+        number += 1
+    if _choice_mode(tool_choice) == "required":
+        lines.append(f"{number}. 这一轮必须给出一行 CALL，不允许只回答。")
+    return "\n".join(lines), aliases
+
+def _choice_mode(tool_choice: Any) -> str:
+    if isinstance(tool_choice, str):
+        lowered = tool_choice.lower()
+        if lowered in ("auto", "none", "required"):
+            return lowered
+        return "auto"
+    if isinstance(tool_choice, dict):
+        return "required"
+    return "auto"
+
+
+def _normalise_tool(tool: Any) -> Optional[Dict[str, Any]]:
+    """Accept both the ``function`` wrapper and the flattened shape."""
+    if not isinstance(tool, dict):
+        return None
+    source = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+    name = source.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    parameters = source.get("parameters")
+    if parameters is None:
+        parameters = source.get("input_schema")
+    if not isinstance(parameters, dict):
+        parameters = {"type": "object", "properties": {}}
+    return {
+        "name": name.strip(),
+        "description": str(source.get("description") or "").strip(),
+        "parameters": parameters,
+    }
+
+
+def declared_names(tools: Sequence[Dict[str, Any]]) -> List[str]:
+    """The tool names the caller declared, in order, deduplicated."""
+    names: List[str] = []
+    for tool in tools or []:
+        spec = _normalise_tool(tool)
+        if spec and spec["name"] not in names:
+            names.append(spec["name"])
+    return names
+
+
+def align_call_names(calls: List[ToolCall],
+                     names: Sequence[str]) -> List[ToolCall]:
+    """Point each call at a name the caller actually declared.
+
+    The model is told to copy the name verbatim, but it is a Chinese-first
+    assistant: asked to emit "the English identifier" it once answered
+    ``execute`` for a tool declared as ``执行命令`` (2026-11-16). A client
+    matches names literally, so a near-miss is useless.
+
+    Repair is deliberately conservative:
+
+    * an exact (case-insensitive) match wins, and the caller's spelling is
+      restored;
+    * otherwise, **only when a single tool was declared**, the call is
+      re-pointed at it — with one candidate there is no ambiguity.
+
+    Anything else is left alone: guessing between several tools would be
+    worse than passing the name through.
+    """
+    names = [name for name in names or [] if name]
+    if not names:
+        return calls
+    lowered = {name.lower(): name for name in names}
+    for call in calls:
+        matched = lowered.get(call.name.lower())
+        if matched:
+            call.name = matched
+        elif len(names) == 1:
+            call.name = names[0]
+    return calls
+
+def render_tool_result(name: str, content: str, call_id: str = "") -> str:
+    """Render a tool result the way the model is told to expect it."""
+    label = f"（id {call_id}）" if call_id else ""
+    return f"[工具结果] {name}{label}\n{content}".strip()
