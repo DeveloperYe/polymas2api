@@ -16,9 +16,24 @@ instead of passing them off as measurements.
 
 The ratio: CJK characters run close to one token each for the BPE vocabularies
 these models use, while Latin text averages around four characters per token.
-That is a rough model, not a tokenizer — it is good for "roughly how big is
-this prompt" and for spotting a sudden doubling, and it should never be used
-to bill anyone.
+That is a rough model, not a tokenizer, and it should never be used to bill
+anyone.
+
+**These numbers are not decorative.** A client that manages its own context
+window stores the reported usage as an anchor and prefers it over its own
+heuristic whenever it is larger — ``dsh-token-meter`` does exactly that:
+``advanceMeasurement`` keeps ``event.data.usage`` on the anchor, and ``measure``
+takes the usage branch when ``usageTokens(usage) >= estimatedAnchorTokens``.
+Verified 2026-11-18: three polymas sessions held anchor ``inputTokens`` of
+24,875 / 46,674 / 28,976, matching this module's ``prompt_tokens`` for the same
+requests digit for digit. So the accuracy here moves the client's compaction
+threshold.
+
+Measured on production-shaped prompts (``tools/probe_prompt_accuracy.py``,
+vendor BPE as ground truth): +7% on a short session, +4% at 24 turns, +1% at 60,
+-0.5% at 120. The ASCII-heavy tool block is overestimated and the Chinese
+conversation is underestimated; they cancel as a session grows, which is the
+regime where compaction matters.
 """
 
 from __future__ import annotations

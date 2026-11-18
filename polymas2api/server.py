@@ -53,15 +53,22 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; "
 
 #: Hard ceiling on a request body.
 #:
-#: Raised from 1 MiB on 2026-11-18. The platform itself accepted a
-#: 1,500,000-character prompt and failed at 1,600,000 (docs/LIMITS.md §1), so
-#: UTF-8 Chinese at 3 bytes per character needs about 4.5 MB just to be able to
-#: ask. At 1 MiB the gateway was the binding limit by a factor of four to nine,
-#: and clients that compact on a context-window percentage could never reach
-#: their threshold: dsh-token-meter counts a flat four characters per token, so
-#: its 80% of a 1M window is 3.2M characters — twice what the platform takes.
-#: 8 MiB carries ~2.7M Chinese characters, comfortably past the platform's own
-#: ceiling, so the platform decides and not us.
+#: Raised from 1 MiB on 2026-11-18, because 1 MiB made a client's own context
+#: management unreachable rather than merely tight.
+#:
+#: A client compacts when its running token count reaches
+#: ``thresholdRatio x contextWindow`` (0.8 by default) - 800,000 for a 1M-token
+#: window. A real agent prompt is about 15% Chinese and 85% ASCII, measured by
+#: solving this gateway's own estimate against a logged 68,438-character
+#: request that came to 24,875 tokens, so 800,000 tokens is roughly 2,200,000
+#: characters and a 2.7 MB body. 1 MiB carries only ~805,000 characters of
+#: that mixture, 37% of the way: every request hit the body cap first and the
+#: compaction never ran.
+#:
+#: 8 MiB carries ~2.7M characters of the same mixture, enough for a whole
+#: 1M-token window (2.75M characters, ~3.4 MB), so the platform's own limit
+#: stops a request and not ours. Still bounded on purpose: the body is read
+#: into memory before parsing.
 MAX_BODY_BYTES = 8 << 20
 
 
