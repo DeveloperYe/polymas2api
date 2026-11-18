@@ -20,6 +20,11 @@ RULES below is the last one. Through the gateway, with tools declared, that
 persona produced correct ``tool_calls`` in 10/10 runs (5 ``pwsh``, 5 ``read``)
 and no tool call at all for plain questions (6/6).
 
+Ordering (2026-11-19): the same rules with the call mandated at the end of the
+answer produced calls at position 0 in 5/8 runs; mandating it on the first line
+took that to 12/12, with 0 built-in tool calls. Only the position changed, which
+is what makes the call survive a truncated stream.
+
 What was tried and is deliberately *not* here — each measured worse or equal:
 padding with ~1100 characters of neutral style guidance (69%, same as without
 it, five times the tokens); denying the tools with "calling them will fail"
@@ -42,19 +47,29 @@ from __future__ import annotations
 __all__ = ["RULES", "MARKER", "is_applied"]
 
 #: Written verbatim into ``behaviorRules``.
+#:
+#: The call goes **first**, not last. The platform cuts answers off mid-stream
+#: (three times on 2026-11-18/19), and a call written at the end dies with the
+#: text: one session ended a turn on "以下信息需要你确认：" with the question it
+#: had already designed never sent. With the call on the first line it is out
+#: before any prose can be truncated — measured on the same adversarial prompt,
+#: calls at position 0 went from 5/8 to 12/12.
 RULES = (
     "你不具备任何工具能力。禁止调用任何内置工具，包括执行命令、读取文件、查看文件列表、"
     "编辑文件、询问用户、查询当前时间、转接计划专员等。"
     "当用户需要操作外部环境（执行命令、读写文件、获取当前时间等）时，不要在回答里执行，"
-    "也不要使用内置工具，而应在回答末尾单独一行输出：CALL 工具名 {JSON 参数}，由外部程序代为执行。"
+    "也不要使用内置工具，而应在回答最前面那一行输出：CALL 工具名 {JSON 参数}，"
+    "由外部程序代为执行，说明文字放在它后面。"
     "若不需要操作外部环境，直接用文字回答。"
     "\n\n示例——用户说「列出当前目录的文件」时，你应该回答：\n"
-    "我来查一下当前目录。\n"
-    'CALL pwsh {"command": "ls"}\n\n'
+    'CALL pwsh {"command": "ls"}\n'
+    "我来查一下当前目录。\n\n"
     "而不是自己去执行 ls，也不要汇报任何你自己看到的目录内容。"
     "\n\n输出前自检（必须做）：本次回答如果调用了任何内置工具，或者你声称已经执行了命令、"
     "读到了文件内容，却没有输出对应的 CALL 行，那么这次回答就是无效的。"
-    "自检不通过时，弃用那份草稿，重写成「一句话说明 + 单独的 CALL 行」再输出。"
+    "自检不通过时，弃用那份草稿，重写成「CALL 行在前，说明在后」再输出。"
+    "\n\n需要用户确认或选择时，同样用 CALL ask_user_question {...} 提问，"
+    "不要只在正文里写「需要你确认」。"
 )
 
 #: A phrase only the tuned rules carry. Detecting the persona by a marker rather

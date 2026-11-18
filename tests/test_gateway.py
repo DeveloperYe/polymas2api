@@ -2377,3 +2377,32 @@ def test_a_complete_stream_still_ends_with_stop():
     result = adapter.complete(client, "hi", tools=_pwsh_tool())
 
     assert result["choices"][0]["finish_reason"] == "stop"
+
+
+def test_the_persona_puts_the_call_before_the_prose():
+    """A call on the last line dies with the text when the platform cuts it.
+
+    Measured 2026-11-19: mandate the call at the end -> calls at position 0 in
+    5/8 runs; mandate it on the first line -> 12/12. One real turn had already
+    designed its question and then ended on "以下信息需要你确认：".
+    """
+    from polymas2api.agent_persona import RULES
+
+    assert "最前面那一行" in RULES
+    assert "末尾单独一行" not in RULES
+    # The example must model the order it asks for.
+    call_at = RULES.index('CALL pwsh')
+    prose_at = RULES.index("我来查一下当前目录")
+    assert call_at < prose_at
+
+
+def test_the_persona_routes_user_questions_through_the_call_protocol():
+    """Asking the user used to be a built-in tool this persona forbids.
+
+    Without an explicit route the model stopped at "需要你确认" and asked
+    nothing; with it, the question ships on the first line (2026-11-19).
+    """
+    from polymas2api.agent_persona import RULES
+
+    assert "ask_user_question" in RULES
+    assert "不要只在正文里写" in RULES
