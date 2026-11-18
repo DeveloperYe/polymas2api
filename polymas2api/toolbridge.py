@@ -65,6 +65,7 @@ __all__ = [
     "align_call_names",
     "build_tool_prompt",
     "declared_names",
+    "has_unterminated_call",
     "parse_tool_calls",
     "render_tool_result",
 ]
@@ -149,17 +150,12 @@ _CALL_LINE_QUOTED_RE = re.compile(
 )
 
 
-def _split_call_arguments(rest: str) -> Tuple[str, str]:
-    """Split ``  {"a":1}tail`` into the JSON object and the text after it.
+def _object_end(text: str) -> int:
+    """Index just past the object's closing brace, or ``-1`` if it never closes.
 
-    Brace depth decides where the object ends, honouring strings and escapes so
-    that a ``}`` inside a command cannot cut it short. Returns ``("", rest)``
-    when the line carries no object at all, which is how a bare ``CALL name``
-    is told apart from a real call.
+    Brace depth decides, honouring strings and escapes so that a ``}`` inside a
+    command cannot cut the object short.
     """
-    text = rest.lstrip()
-    if not text.startswith("{"):
-        return "", ""
     depth = 0
     in_string = False
     escaped = False
@@ -179,8 +175,50 @@ def _split_call_arguments(rest: str) -> Tuple[str, str]:
         elif char == "}":
             depth -= 1
             if depth == 0:
-                return text[:index + 1], text[index + 1:].strip()
-    return "", ""
+                return index + 1
+    return -1
+
+
+def _split_call_arguments(rest: str) -> Tuple[str, str]:
+    """Split ``  {"a":1}tail`` into the JSON object and the text after it.
+
+    Returns ``("", "")`` when the line carries no object at all, which is how a
+    bare ``CALL name`` is told apart from a real call.
+    """
+    text = rest.lstrip()
+    if not text.startswith("{"):
+        return "", ""
+    end = _object_end(text)
+    if end < 0:
+        return "", ""
+    return text[:end], text[end:].strip()
+
+
+#: ``CALL name {`` — the opening brace, without requiring a closing one.
+_CALL_LINE_OPEN_RE = re.compile(
+    r"^[ \t>*\-]*(?:" + CALL_MARKER + r"[ \t]*[:：]?[ \t]*)"
+    r"(?:" + _NAME_CHARS + r")[ \t]*(\{)",
+    re.MULTILINE,
+)
+
+
+def has_unterminated_call(text: str) -> bool:
+    """True when the answer stops in the middle of a ``CALL``'s argument object.
+
+    A truncated answer leaves the command half-written: nothing can run, and
+    the client cannot tell that from "the assistant finished without asking for
+    a tool". Reporting such an answer as a normal stop is what lets an agent
+    believe the work was done and repeat it next round (seen 2026-11-18: a
+    12k-token answer cut off in the middle of a C++ file inside the command).
+    The caller turns this into ``finish_reason="length"``.
+    """
+    if not text:
+        return False
+    for match in _CALL_LINE_OPEN_RE.finditer(text):
+        if _object_end(text[match.start(1):]) < 0:
+            return True
+    return False
+
 
 _FENCE_RE = re.compile(r"```[ \t]*[A-Za-z0-9_+-]*[ \t]*\r?\n(.*?)```", re.DOTALL)
 

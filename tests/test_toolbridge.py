@@ -20,6 +20,7 @@ from polymas2api.adapter import OpenAIAdapter
 from polymas2api.toolbridge import (
     ToolCallStream,
     build_tool_prompt,
+    has_unterminated_call,
     parse_tool_calls,
     render_tool_result,
 )
@@ -692,3 +693,21 @@ def test_a_call_without_arguments_is_left_alone():
 
     assert calls == []
     assert content.strip() == "CALL foo"
+
+
+# -- a call that never closes -----------------------------------------------
+def test_an_unterminated_call_is_reported():
+    """The answer stopped inside the argument object: nothing can run."""
+    assert has_unterminated_call('CALL pwsh {"command": "echo hi') is True
+    assert has_unterminated_call('CALL pwsh {"a": {"b": 1}') is True
+
+
+def test_a_complete_call_is_not_reported_as_unterminated():
+    assert has_unterminated_call('CALL pwsh {"command": "echo hi"}') is False
+    assert has_unterminated_call('CALL pwsh {"command": "echo hi"}接着说话') is False
+
+
+def test_prose_holding_a_brace_is_not_a_truncated_call():
+    """Only a real CALL line counts; a stray { in the answer is just text."""
+    assert has_unterminated_call('这段 JSON 没闭合：{"a": 1') is False
+    assert has_unterminated_call('') is False

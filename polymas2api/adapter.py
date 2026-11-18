@@ -17,7 +17,7 @@ from .tokens import usage_for
 from .attachments import part_to_text
 from .persona import NameScrubber, StreamWasher
 from .toolbridge import (ToolCallStream, align_call_names, declared_names,
-                         parse_tool_calls)
+                         has_unterminated_call, parse_tool_calls)
 
 __all__ = ["OpenAIAdapter"]
 
@@ -149,7 +149,24 @@ class OpenAIAdapter:
                 yield self._chunk(model, delta={"tool_calls": [call.to_openai(index)]})
             yield self._chunk(model, delta={}, finish_reason="tool_calls", usage=usage)
             return
-        yield self._chunk(model, delta={}, finish_reason="stop", usage=usage)
+        yield self._chunk(model, delta={},
+                          finish_reason=self._finish_reason(tools, "".join(sent_content), calls),
+                          usage=usage)
+
+    def _finish_reason(self, tools: Any, content: str, calls: List[Any]) -> str:
+        """``stop`` normally, ``length`` when the answer dies inside a call.
+
+        An answer that stops in the middle of a ``CALL``'s argument object was
+        cut off: no tool can run, and telling the client the turn finished
+        normally is what lets an agent believe the work was done and repeat it
+        (seen 2026-11-18). ``length`` is how OpenAI reports a truncated answer,
+        so a client maps it to "output limit" and retries in smaller pieces.
+        """
+        if calls:
+            return "tool_calls"
+        if tools and has_unterminated_call(content):
+            return "length"
+        return "stop"
 
     def _upstream_tool(self, event: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Describe one of the *agent's own* tool calls.
@@ -221,6 +238,9 @@ class OpenAIAdapter:
         usage = usage_for(prompt, content, reasoning)
 
         calls: List[Any] = []
+        # Measured on the text as it arrived: once a call parses, the line is
+        # gone from ``content`` and the truncation would look like a clean end.
+        raw_content = content
         if tools:
             # The call travels inside the answer text; take it out again.
             content, calls = parse_tool_calls(content)
@@ -231,11 +251,10 @@ class OpenAIAdapter:
         message: Dict[str, Any] = {"role": "assistant", "content": content}
         if reasoning:
             message["reasoning_content"] = reasoning
-        finish_reason = "stop"
+        finish_reason = self._finish_reason(tools, raw_content, calls)
         if calls:
             message["tool_calls"] = [call.to_openai(index)
                                      for index, call in enumerate(calls)]
-            finish_reason = "tool_calls"
         result: Dict[str, Any] = {
             "id": "chatcmpl-polymas",
             "object": "chat.completion",

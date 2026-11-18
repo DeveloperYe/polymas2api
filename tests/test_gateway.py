@@ -388,6 +388,62 @@ def test_stream_emits_content_then_stop():
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
 
 
+# -- a truncated call must not look like a clean stop ------------------------
+def _pwsh_tool():
+    return [{"type": "function",
+             "function": {"name": "pwsh", "description": "run a command",
+                          "parameters": {"type": "object", "properties": {}}}}]
+
+
+TRUNCATED_CALL = 'CALL pwsh {"command": "echo ' + "x" * 40
+
+
+def test_complete_reports_a_truncated_call_as_length():
+    """A cut-off answer cannot run anything; "stop" would claim it finished.
+
+    Seen 2026-11-18: a 12k-token answer ended inside the command, the client
+    was told "stop", and the agent believed the work was done and repeated it.
+    """
+    client = _FakeClient([
+        ("ANSWER", {"text": TRUNCATED_CALL}),
+        ("ALL_FINISHED", {"text": None}),
+    ])
+    adapter = OpenAIAdapter(_Config())
+    result = adapter.complete(client, "hi", tools=_pwsh_tool())
+    assert result["choices"][0]["finish_reason"] == "length"
+    assert "tool_calls" not in result["choices"][0]["message"]
+
+
+def test_stream_reports_a_truncated_call_as_length():
+    client = _FakeClient([
+        ("ANSWER", {"text": TRUNCATED_CALL}),
+        ("ALL_FINISHED", {"text": None}),
+    ])
+    adapter = OpenAIAdapter(_Config())
+    chunks = list(adapter.stream(client, "hi", tools=_pwsh_tool()))
+    assert chunks[-1]["choices"][0]["finish_reason"] == "length"
+
+
+def test_a_whole_call_is_still_tool_calls():
+    client = _FakeClient([
+        ("ANSWER", {"text": 'CALL pwsh {"command": "ls"}'}),
+        ("ALL_FINISHED", {"text": None}),
+    ])
+    adapter = OpenAIAdapter(_Config())
+    result = adapter.complete(client, "hi", tools=_pwsh_tool())
+    assert result["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_an_answer_with_no_call_still_ends_with_stop():
+    client = _FakeClient([
+        ("ANSWER", {"text": "数据在这里：{\"a\": 1"}),
+        ("ALL_FINISHED", {"text": None}),
+    ])
+    adapter = OpenAIAdapter(_Config())
+    result = adapter.complete(client, "hi", tools=_pwsh_tool())
+    assert result["choices"][0]["finish_reason"] == "stop"
+
+
 # -- pool ---------------------------------------------------------------------
 class _PoolConfig:
     user_nid = "u"
