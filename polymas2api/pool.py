@@ -429,6 +429,11 @@ class CredentialPool:
         with self._lock:
             return [account.to_public() for account in self._accounts.values()]
 
+    def accounts(self) -> List[Credential]:
+        """Every account, in insertion order — for actions that touch them all."""
+        with self._lock:
+            return list(self._accounts.values())
+
     def get(self, uid: str) -> Optional[Credential]:
         with self._lock:
             return self._accounts.get(uid)

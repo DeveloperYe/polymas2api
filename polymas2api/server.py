@@ -28,6 +28,7 @@ from .credentials import (CredentialStatus, decode_jwt, inspect_credential,
                           looks_rejected)
 from .fingerprint import PROFILES, Fingerprint, RequestShaper, build_ssl_context
 from .journal import Journal, JournalEntry
+from . import agent_persona
 from .persona import NameScrubber
 from .tokens import usage_for
 from .toolbridge import build_tool_prompt, declared_names
@@ -1298,14 +1299,18 @@ class Gateway:
         2. creates a generic agent under that account
            (``POST /llmOps/application/saveAssistant``, measured 2026-11-16 —
            a STUDENT account may do this, and the reply carries the new nid);
-        3. pulls that agent's model catalogue, which proves the pairing really
+        3. writes the tuned persona into that agent
+           (``PUT /ai-agent/persona/{nid}``), which is the only level where a
+           client can compete with the platform's built-in toolbelt;
+        4. pulls that agent's model catalogue, which proves the pairing really
            works before anything is written to disk;
-        4. stores the account with the new nid as ``friend_nid``/``app_code``.
+        5. stores the account with the new nid as ``friend_nid``/``app_code``.
 
         Why create an agent at all: the course-representative agents ship a
         built-in 「询问用户」 tool that steals tool calls, and they carry a
         course knowledge base this gateway has no use for. A self-built shell
-        has neither.
+        has neither — but it still gets the platform's sandbox tools, which is
+        what the persona is for.
         """
         parsed = self._parse_account_payload(payload)
         if "error" in parsed:
@@ -1336,6 +1341,7 @@ class Gateway:
         # -- the agent that will actually answer ---------------------------
         friend_nid = account.friend_nid
         created = ""
+        persona_result: Dict[str, Any] = {"applied": False, "error": "未新建助手"}
         if payload.get("create_agent", True):
             try:
                 created = client.create_assistant(
@@ -1346,6 +1352,7 @@ class Gateway:
             account.friend_nid = created
             account.app_code = created
             friend_nid = created
+            persona_result = self._write_persona(account, created)
         elif not friend_nid:
             return {"ok": False, "error": {
                 "message": "没有可用的助手 id，也没有要求新建助手"}}
@@ -1371,7 +1378,48 @@ class Gateway:
         public = account.to_public()
         public["created_agent"] = created
         return {"ok": True, "account": public, "persisted": persisted,
+                "persona": persona_result,
                 "note": "" if persisted else "accounts_file 未配置，重启后会丢失"}
+
+    def _write_persona(self, account: Any, agent_nid: str) -> Dict[str, Any]:
+        """Put the tuned persona on one agent; never fail the caller for it.
+
+        An agent without the persona still answers — it just keeps using the
+        platform's own sandbox tools on some prompts — so a rejection here is
+        reported to the panel rather than rolled back.
+        """
+        try:
+            client = self._account_client(account)
+            client.set_persona(agent_nid, agent_persona.RULES)
+        except (UpstreamError, OSError) as error:
+            self.log(f"persona not written for {agent_nid}: {error}")
+            return {"applied": False, "error": str(error)}
+        self.log(f"persona written for {agent_nid}")
+        return {"applied": True, "error": ""}
+
+    def panel_apply_persona(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """(Re)write the tuned persona onto existing accounts' agents.
+
+        Accounts added before the persona existed carry an empty one, which is
+        why this is a panel action and not just a step of ``accounts``.
+        """
+        uid = str(payload.get("uid") or "")
+        targets = ([self.pool.get(uid)] if uid else list(self.pool.accounts()))
+        targets = [account for account in targets if account is not None]
+        if uid and not targets:
+            return {"ok": False, "error": {"message": f"账号 {uid} 不存在"}}
+        results = []
+        for account in targets:
+            nid = account.app_code or account.friend_nid
+            if not nid:
+                results.append({"uid": account.uid, "applied": False,
+                                "error": "账号没有助手 id"})
+                continue
+            outcome = self._write_persona(account, nid)
+            results.append({"uid": account.uid, "agent": nid, **outcome})
+        applied = [item for item in results if item.get("applied")]
+        return {"ok": bool(applied) or not results, "results": results,
+                "applied": len(applied), "total": len(results)}
 
     def panel_set_label(self, uid: str, label: Any) -> Dict[str, Any]:
         """Rename the note shown in the accounts table."""
@@ -1778,6 +1826,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if route == "accounts":
                 result = gateway.panel_add_account(body)
+                self._send_json(result, 200 if result.get("ok") else 400)
+                return
+            if route == "persona/apply":
+                result = gateway.panel_apply_persona(body)
                 self._send_json(result, 200 if result.get("ok") else 400)
                 return
             if route.startswith("accounts/") and route.endswith("/label"):

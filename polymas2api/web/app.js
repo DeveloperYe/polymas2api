@@ -973,6 +973,34 @@
       }, 3000);
     });
 
+    $("apply-persona").addEventListener("click", function () {
+      var button = $("apply-persona");
+      var info = $("persona-info");
+      button.disabled = true;
+      button.textContent = "写入中…";
+      api("persona/apply", { method: "POST", body: {} })
+        .then(function (data) {
+          var failures = (data.results || []).filter(function (item) {
+            return !item.applied;
+          });
+          var failed = data.total - data.applied;
+          info.textContent = failed
+            ? "已写入 " + data.applied + "/" + data.total + "，失败：" +
+              failures.map(function (item) {
+                return item.uid + "（" + item.error + "）";
+              }).join("；")
+            : "已写入 " + data.applied + " 个助手";
+        })
+        .catch(function (error) {
+          info.textContent = "写入失败";
+          showError(error);
+        })
+        .then(function () {
+          button.disabled = false;
+          button.textContent = "写入助手人设";
+        });
+    });
+
     refreshHealth();
     if (state.key) {
       $("gate").classList.remove("on");

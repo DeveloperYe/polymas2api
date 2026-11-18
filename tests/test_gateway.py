@@ -2212,3 +2212,126 @@ def test_a_reply_without_tools_journals_an_empty_column(gateway_with_temp_accoun
                                                   "content": "hi", "tool_calls": None}}]}
     gw._record(account, "m", "prompt", reply, 0.0, False, [])
     assert gw.journal.recent(limit=1)[0]["tools"] == ""
+
+
+# -- the persona written into every created agent (2026-11-19) -------------
+
+
+def test_the_tuned_persona_carries_the_three_things_that_worked():
+    """Forbid + one example + an output self-check, and nothing else.
+
+    Measured 2026-11-18/19 on one adversarial prompt: 0% followed the CALL
+    protocol without a persona, 45% with the forbid rule, 71% once a single
+    concrete example was added, 100% (15/15) after the self-check.
+    """
+    from polymas2api.agent_persona import MARKER, RULES, is_applied
+
+    assert "禁止调用任何内置工具" in RULES
+    assert 'CALL pwsh {"command": "ls"}' in RULES
+    assert MARKER in RULES
+    assert is_applied(RULES)
+    # An agent nobody configured is the 0% case.
+    assert not is_applied("")
+    assert not is_applied("随便写的人设")
+
+
+def test_set_persona_sends_a_put_with_the_rules():
+    from polymas2api.agent_persona import RULES
+    from polymas2api.upstream import PolymasClient
+
+    sent = {}
+    client = PolymasClient(Config(), Credential(
+        uid="x", user_nid="Nid-Z", friend_nid="agent-1", ai_poly="tok"))
+
+    def fake_post(path, payload, timeout=60.0, method="POST"):
+        sent.update(path=path, payload=payload, method=method)
+        return {"behaviorRules": payload["behaviorRules"]}
+
+    client._post = fake_post
+    client.set_persona("agent-1", RULES)
+
+    assert sent["method"] == "PUT"
+    assert sent["path"] == "/ai-agent/persona/agent-1"
+    assert sent["payload"]["behaviorRules"] == RULES
+    assert sent["payload"]["teachingStyles"] == []
+    assert sent["payload"]["expertiseAreas"] == []
+
+
+class _AgentStub:
+    """Enough of PolymasClient for the add-account flow."""
+
+    def __init__(self, persona_error=None):
+        self.written = {}
+        self.persona_error = persona_error
+
+    def user_sig(self):
+        return "sig"
+
+    def create_assistant(self, name="通用助手"):
+        return "NewAgent"
+
+    def models(self):
+        return {"models": [{"id": "m"}]}
+
+    def set_persona(self, agent_nid, rules):
+        if self.persona_error is not None:
+            raise self.persona_error
+        self.written["nid"] = agent_nid
+        self.written["rules"] = rules
+        return {}
+
+
+def test_adding_an_account_writes_the_persona_onto_the_new_agent(
+        gateway_with_temp_accounts, monkeypatch):
+    """Creating the agent and configuring it are one panel action."""
+    gw = gateway_with_temp_accounts()
+    stub = _AgentStub()
+    monkeypatch.setattr(gw, "_account_client", lambda account: stub)
+
+    result = gw.panel_add_account({"ai_poly": _fake_jwt({"userNid": "Nid-P"})})
+
+    assert result["ok"] is True
+    assert result["persona"] == {"applied": True, "error": ""}
+    assert stub.written["nid"] == "NewAgent"
+    assert "禁止调用任何内置工具" in stub.written["rules"]
+
+
+def test_a_persona_failure_does_not_lose_the_account(
+        gateway_with_temp_accounts, monkeypatch):
+    """The agent still answers, it just keeps the built-in tools in play."""
+    from polymas2api.upstream import UpstreamError
+
+    gw = gateway_with_temp_accounts()
+    stub = _AgentStub(persona_error=UpstreamError("HTTP 500 from persona"))
+    monkeypatch.setattr(gw, "_account_client", lambda account: stub)
+
+    result = gw.panel_add_account({"ai_poly": _fake_jwt({"userNid": "Nid-Q"})})
+
+    assert result["ok"] is True
+    assert result["persona"]["applied"] is False
+    assert "HTTP 500" in result["persona"]["error"]
+    assert gw.pool.get("Nid-Q") is not None
+
+
+def test_apply_persona_covers_the_accounts_already_in_the_pool(
+        gateway_with_temp_accounts, monkeypatch):
+    """Accounts added before the persona existed are exactly why this exists."""
+    gw = gateway_with_temp_accounts()
+    gw.panel_add_account({"ai_poly": _fake_jwt({"userNid": "Nid-R"}),
+                          "friend_nid": "agent-old", "verify": False,
+                          "create_agent": False})
+    stub = _AgentStub()
+    monkeypatch.setattr(gw, "_account_client", lambda account: stub)
+
+    result = gw.panel_apply_persona({})
+
+    assert result["ok"] is True
+    assert result["applied"] == result["total"] >= 1
+    assert any(item.get("agent") == "agent-old" for item in result["results"])
+
+
+def test_apply_persona_for_an_unknown_account_says_so(gateway_with_temp_accounts):
+    gw = gateway_with_temp_accounts()
+    result = gw.panel_apply_persona({"uid": "nope"})
+    assert result["ok"] is False
+    assert "不存在" in result["error"]["message"]

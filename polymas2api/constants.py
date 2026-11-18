@@ -42,6 +42,11 @@ CHAT_STREAM_PATH = "/ai-agent/assistant/v1/chat/stream"
 #: Starts a fresh assistant session (clears the long-term memory window).
 CHAT_NEW_PATH = "/ai-agent/assistant/v1/chat/new"
 
+#: One agent's persona. ``GET`` reads it, ``PUT`` writes it; the written
+#: ``behaviorRules`` ends up in that agent's own system prompt, which is the only
+#: place a client can argue with the built-in toolbelt (see ``persona.py``).
+PERSONA_PATH = "/ai-agent/persona/{}"
+
 #: Model catalogue for one agent. ``appCode`` is the agent nid.
 MODEL_PROPERTIES_PATH = "/chatim/v1/robot/model/properties"
 

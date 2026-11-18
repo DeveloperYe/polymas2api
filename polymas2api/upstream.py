@@ -397,11 +397,11 @@ class PolymasClient:
         }
 
     def _post(self, path: str, payload: Dict[str, Any],
-              timeout: float = 60.0) -> Any:
-        """POST one JSON body and unwrap the platform envelope."""
+              timeout: float = 60.0, method: str = "POST") -> Any:
+        """Send one JSON body and unwrap the platform envelope."""
         url = C.CLOUD_API + path
         request = urllib.request.Request(
-            url, data=json.dumps(payload).encode("utf-8"), method="POST")
+            url, data=json.dumps(payload).encode("utf-8"), method=method)
         headers = list(self._headers(accept="application/json"))
         for name, value in headers:
             request.add_header(name, value)
@@ -460,6 +460,31 @@ class PolymasClient:
                 f"agent creation returned no nid: {str(result)[:200]}",
                 account=self._key)
         return str(nid)
+
+    def get_persona(self, agent_nid: str) -> Dict[str, Any]:
+        """Read one agent's persona (``behaviorRules`` and the two list fields)."""
+        result = self._get(C.PERSONA_PATH.format(agent_nid), timeout=30.0)
+        return result if isinstance(result, dict) else {}
+
+    def set_persona(self, agent_nid: str, rules: str = "",
+                    teaching_styles: Optional[list] = None,
+                    expertise_areas: Optional[list] = None,
+                    timeout: float = 30.0) -> Dict[str, Any]:
+        """Write one agent's persona and return what the platform echoes back.
+
+        The platform renders ``behaviorRules`` into that agent's system prompt,
+        which is the only level where a client can compete with the built-in
+        toolbelt — see :mod:`polymas2api.persona` for the measurements behind
+        the default text and for what did not work.
+        """
+        payload = {
+            "behaviorRules": rules,
+            "teachingStyles": list(teaching_styles or []),
+            "expertiseAreas": list(expertise_areas or []),
+        }
+        result = self._post(C.PERSONA_PATH.format(agent_nid), payload,
+                            timeout=timeout, method="PUT")
+        return result if isinstance(result, dict) else {"behaviorRules": rules}
 
     def models(self) -> Dict[str, Any]:
         """The assistant's model catalogue.

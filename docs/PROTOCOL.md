@@ -14,6 +14,18 @@
 | IM 实时通道 | `wss://cloudapi.polymas.com/socket/api/chat/{userNid}/{friendNid}` |
 | `openapi.polymas.com` | **死域名**：实测 `/v1/chat/completions` → `404 No static resource` |
 
+沙箱（执行命令跑在哪）：`GET /ai-agent/sandbox/admin/config` 返回
+
+```
+apiBaseUrl : https://api.cn-hangzhou.e2b.fc.aliyuncs.com
+templateId : polymas-agent-09021607     runUser : root     timeout : 7200
+nasMounts  : 工作目录（阿里云 NAS）
+```
+
+即 agent 的「执行命令」跑在**阿里云函数计算上的 E2B 沙箱**里，与平台后端、与模型调用都是分开的：沙箱只执行命令，不参与模型推理。所以沙箱内的进程/网络探测拿不到模型端点（也拿不到它的鉴权），且 agent 本身会拒绝 `ps`/`ss`/`/proc` 这类基础设施探测。
+
+接口全貌：`GET /ai-agent/v3/api-docs` 直接返回 **OpenAPI 3.1**（232 个接口），是本仓库理解平台最完整的来源。**该清单只留在本地 `work/ai-agent-openapi.json`，不随本仓库发布**——它把平台的整套接口面（含管理接口）一次列全，公开出去等于替别人省掉摸索成本。chat 面只有 `/assistant/v1/chat/{stream,new,resume,confirm,abandoned,active/list}`，**不存在** `/chat/completions`、`/completions`、`/inference`（文档 + 逐个探测双向确认）。管理类接口 `/agent/token-usage/*`、`/agent/tool-request-log/*` 对学生账号返回 403。
+
 平台**没有任何 OpenAI 兼容端点**。前端常量表里有 `openApiHost:"openapi.polymas.com"`，但 404 个 JS bundle 里该字符串只出现 1 次（就是常量定义本身），没有任何 URL 模板用到它。
 
 > 证据：下载 404 个真实 JS（`xiaozhen-recon/all2`、`all3`，共 114 MB），正则统计 `openApiHost`/`v1/chat/completions`/`/v1/models`/`Bearer `/`X-Requested-With` 全部 0 命中（`openapi-token` 的 17 次命中是依赖文件名里的片段，假阳性）。
@@ -1883,7 +1895,62 @@ AI课代表创建表单的设置项（老师端）：名称、描述、**提示�
 
 ---
 
-## 7. 证据索引
+## 7. agent 人设：唯一能与内置工具对抗的层级（2026-11-19）
+
+### 7.1 为什么只有人设有用
+
+模型看到的 system prompt 由三块拼成，模型自己在思考里点名了它们：
+
+```
+[System] Soul        ← PUT /ai-agent/persona/{nid} 写进去的 behaviorRules
+[System] # 动态准则   ← 平台按 agent 配置生成
+[Tools]  执行命令 / 读取文件 / 查看文件列表 / 询问用户 / 查询当前时间 / 转接计划专员
+```
+
+写进 `userInput` 的东西是**用户消息**，输给工具定义；`Soul` 与工具定义**同级**，模型只能自己裁决。实测思考原文：「系统提示里有矛盾：Soul 部分说『你不具备任何工具能力』…但实际工具列表里有 execute」。
+
+接口：
+
+```
+GET /ai-agent/persona/{agentNid}   → {behaviorRules, teachingStyles, expertiseAreas, rawContent(SOUL.md), ...}
+PUT /ai-agent/persona/{agentNid}   ← {behaviorRules, teachingStyles:[], expertiseAreas:[]}
+```
+
+新建 agent 后 `behaviorRules` 是空串 —— 这就是默认 0% 的那一档。
+
+### 7.2 六种写法的实测（同一句对抗提示词）
+
+提示词固定为「请执行命令列出当前目录的文件，然后告诉我文件数量」，统计走 `CALL` 协议的比例：
+
+| 写法 | CALL 协议 | 样本 |
+|---|---:|---:|
+| 无人设 | 0% | 3 |
+| 禁止 + 格式说明 | 45% | 20 |
+| **+ 一条具体示例** | **71%** | 14 |
+| **+ 输出前自检** | **100%** | **15** |
+| 加强版「工具已关闭，调用必然失败」 | 17% | 6 |
+| 事实版「你只能看到服务端沙箱」 | 25% | 8 |
+| 身份重定义「纯文本推理引擎」 | 0% | 6 |
+| 五条示例（含反面例子） | 17% | 6 |
+| 加 1116 字符中性填充（稀释） | 69% | 16 |
+| 加「注意注意！看这里！」前缀 | 100%（与无前缀相同） | 6 |
+
+规律：**起作用的是结构——位置（system 里的 Soul 段）、具体性（一条示例）、可执行性（自检是个动作）；不起作用的是情绪和长度。**
+
+反直觉的两条：说「不要编造执行结果」反而让它去调工具核实（0%）；说「调用会失败」激发它试一下（17%）。
+
+### 7.3 样本量
+
+同一份人设三批分别 5/6、5/8、3/8（83% → 37.5%）。**这类概率实验至少要 15 次才能下结论**，6 次可能偏差 30 个百分点。
+
+### 7.4 网关侧
+
+- 新建账号时自动写入：`panel_add_account` 在 `saveAssistant` 之后调 `PUT /persona/{nid}`，失败只回报不中断（账号仍可用，只是少了这层压制）。
+- 已有账号补写：面板「写入助手人设」按钮 → `POST /panel/api/persona/apply`（可带 `{"uid": …}` 只写一个）。
+- 人设文本固定在 `polymas2api/agent_persona.py`，含上表的取舍理由；`is_applied()` 用标记串判断是否已写。
+- 兜底仍是网关的 `tool_retry`：检测到模型用了自带工具且没有 CALL 就整条重跑。人设降低发生率，重试兜住漏网的。
+
+## 8. 证据索引
 
 | 结论 | 证据 |
 |---|---|
