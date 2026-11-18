@@ -254,9 +254,60 @@ def _arguments_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+#: A backslash that does not begin a legal JSON escape. The model writes regex
+#: and Windows paths with a single backslash (``\.exe``, ``C:\Users``) while
+#: JSON only allows ``\" \\ \/ \b \f \n \r \t \uXXXX``; a strict parse then
+#: rejects the whole call and the line leaks into the answer as plain text
+#: (seen 2026-11-18: a PowerShell regex killed the call).
+_LEGAL_ESCAPES = frozenset('"\\/bfnrt')
+_HEX_DIGITS = frozenset('0123456789abcdefABCDEF')
+
+
+def _repair_escapes(text: str) -> str:
+    """Double every backslash that JSON does not accept as an escape.
+
+    Scanned left to right so a legal ``\\\\`` is consumed as one escape: a
+    regex substitution cannot tell the second backslash of ``\\\\`` from a
+    stray one and would corrupt it.
+    """
+    out: List[str] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char != "\\":
+            out.append(char)
+            index += 1
+            continue
+        following = text[index + 1] if index + 1 < length else ""
+        if following in _LEGAL_ESCAPES and following:
+            out.append(text[index:index + 2])
+            index += 2
+            continue
+        if following == "u" and len(text[index + 2:index + 6]) == 4 \
+                and all(digit in _HEX_DIGITS for digit in text[index + 2:index + 6]):
+            out.append(text[index:index + 6])
+            index += 6
+            continue
+        out.append("\\\\")  # what the model meant: an escaped backslash
+        index += 1
+    return "".join(out)
+
+
 def _loads(text: str) -> Any:
+    r"""Decode a call's arguments, tolerating a stray backslash.
+
+    Strict first: a body that is already valid JSON is never rewritten, so
+    nothing that parses today can change meaning. Only when that fails is each
+    illegal escape doubled — which is what the model meant — so ``\.exe``
+    reaches the command as ``\\.exe`` instead of dropping the call.
+    """
     try:
         return json.loads(text.strip())
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        pass
+    try:
+        return json.loads(_repair_escapes(text.strip()))
     except (json.JSONDecodeError, TypeError, AttributeError):
         return None
 

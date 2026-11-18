@@ -711,3 +711,38 @@ def test_prose_holding_a_brace_is_not_a_truncated_call():
     """Only a real CALL line counts; a stray { in the answer is just text."""
     assert has_unterminated_call('这段 JSON 没闭合：{"a": 1') is False
     assert has_unterminated_call('') is False
+
+
+# -- a backslash the model wrote for a regex, not for JSON -------------------
+def test_a_regex_backslash_does_not_kill_the_call():
+    r"""``\.exe`` is not legal JSON, but it is what the model means.
+
+    Seen 2026-11-18: a PowerShell pattern ``bot-([0-9a-f]{12})\.exe`` made the
+    strict parse fail, so the whole call was dropped and the CALL line leaked
+    into the answer the user reads.
+    """
+    line = 'CALL pwsh {"command": "Select-String -Pattern \'bot-\\.exe\'"}'
+    content, calls = parse_tool_calls(line)
+
+    assert [call.name for call in calls] == ["pwsh"]
+    assert "bot-\\.exe" in json.loads(calls[0].arguments)["command"]
+    assert content == ""
+
+
+def test_a_windows_path_with_one_backslash_still_parses():
+    r"""JSON has no ``\U`` escape; a path written plainly must not drop the call."""
+    line = 'CALL read_file {"path": "C:\\Users\\a.txt"}'
+    content, calls = parse_tool_calls(line)
+
+    assert len(calls) == 1
+    assert json.loads(calls[0].arguments)["path"] == "C:\\Users\\a.txt"
+
+
+def test_valid_json_is_never_rewritten():
+    r"""The repair only runs after a strict parse fails."""
+    line = 'CALL pwsh {"command": "echo a\\nb"}'
+    content, calls = parse_tool_calls(line)
+
+    assert len(calls) == 1
+    # \n stays an escape, not a literal backslash-n.
+    assert json.loads(calls[0].arguments)["command"] == "echo a\nb"
