@@ -150,20 +150,27 @@ class OpenAIAdapter:
             yield self._chunk(model, delta={}, finish_reason="tool_calls", usage=usage)
             return
         yield self._chunk(model, delta={},
-                          finish_reason=self._finish_reason(tools, "".join(sent_content), calls),
+                          finish_reason=self._finish_reason(
+                              tools, "".join(sent_content), calls,
+                              bool(getattr(client, "last_stream_finished", True))),
                           usage=usage)
 
-    def _finish_reason(self, tools: Any, content: str, calls: List[Any]) -> str:
-        """``stop`` normally, ``length`` when the answer dies inside a call.
+    def _finish_reason(self, tools: Any, content: str, calls: List[Any],
+                       completed: bool = True) -> str:
+        """``stop`` normally, ``length`` when the answer did not really finish.
 
-        An answer that stops in the middle of a ``CALL``'s argument object was
-        cut off: no tool can run, and telling the client the turn finished
-        normally is what lets an agent believe the work was done and repeat it
-        (seen 2026-11-18). ``length`` is how OpenAI reports a truncated answer,
-        so a client maps it to "output limit" and retries in smaller pieces.
+        Two ways an answer arrives short of its own end: the platform closed the
+        stream without its ``ALL_FINISHED`` marker, or the text dies inside a
+        ``CALL``'s argument object. Both leave the client unable to tell "the
+        model finished" from "the answer was cut", which is what let an agent
+        believe the work was done and repeat it (seen 2026-11-18/19). ``length``
+        is how OpenAI reports a truncated answer, so a client maps it to an
+        output limit instead of a completion.
         """
         if calls:
             return "tool_calls"
+        if not completed:
+            return "length"
         if tools and has_unterminated_call(content):
             return "length"
         return "stop"
@@ -251,7 +258,9 @@ class OpenAIAdapter:
         message: Dict[str, Any] = {"role": "assistant", "content": content}
         if reasoning:
             message["reasoning_content"] = reasoning
-        finish_reason = self._finish_reason(tools, raw_content, calls)
+        finish_reason = self._finish_reason(
+            tools, raw_content, calls,
+            bool(getattr(client, "last_stream_finished", True)))
         if calls:
             message["tool_calls"] = [call.to_openai(index)
                                      for index, call in enumerate(calls)]

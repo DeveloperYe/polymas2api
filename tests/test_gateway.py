@@ -2335,3 +2335,45 @@ def test_apply_persona_for_an_unknown_account_says_so(gateway_with_temp_accounts
     result = gw.panel_apply_persona({"uid": "nope"})
     assert result["ok"] is False
     assert "不存在" in result["error"]["message"]
+
+
+# -- an answer the platform cut is not a finished answer (2026-11-19) ------
+
+class _CutClient(_FakeClient):
+    """A client whose stream ended without the platform's ALL_FINISHED."""
+
+    def __init__(self, events):
+        super().__init__(events)
+        self.last_stream_finished = False
+
+
+def test_a_stream_cut_before_all_finished_reports_length():
+    """The platform closes a complete answer with ALL_FINISHED.
+
+    Seen 2026-11-19: a 17k-token answer stopped right after "以下信息需要你确认："
+    with no tool call and no finish marker, so the client was told "stop" and
+    the agent believed it had asked. Nothing reached the user.
+    """
+    client = _CutClient([("ANSWER", {"text": "以下信息需要你确认："})])
+    adapter = OpenAIAdapter(_Config())
+    result = adapter.complete(client, "hi", tools=_pwsh_tool())
+
+    assert result["choices"][0]["finish_reason"] == "length"
+
+
+def test_a_cut_streaming_answer_reports_length():
+    client = _CutClient([("ANSWER", {"text": "以下信息需要你确认："})])
+    adapter = OpenAIAdapter(_Config())
+    chunks = list(adapter.stream(client, "hi", tools=_pwsh_tool()))
+
+    assert chunks[-1]["choices"][0]["finish_reason"] == "length"
+
+
+def test_a_complete_stream_still_ends_with_stop():
+    """_FakeClient leaves last_stream_finished alone; default is complete."""
+    client = _FakeClient([("ANSWER", {"text": "你好"}),
+                          ("ALL_FINISHED", {"text": None})])
+    adapter = OpenAIAdapter(_Config())
+    result = adapter.complete(client, "hi", tools=_pwsh_tool())
+
+    assert result["choices"][0]["finish_reason"] == "stop"

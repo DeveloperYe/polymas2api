@@ -183,6 +183,9 @@ class PolymasClient:
         self.shaper = shaper or RequestShaper(config, logger=self.log)
         #: Set to a renewed platform token to override the configured one.
         self._override_credential = ""
+        #: Whether the last ``chat()`` stream closed with the platform's
+        #: ``ALL_FINISHED`` marker. ``False`` means the answer was cut.
+        self.last_stream_finished = True
 
     # -- identity -----------------------------------------------------------
     @property
@@ -671,6 +674,12 @@ class PolymasClient:
                                 "retainLongTermMemory": retain}
         # Pace the call so the traffic does not look machine-generated.
         self.shaper.wait(self._key, prompt)
+        #: The platform closes a complete answer with ``ALL_FINISHED``. A stream
+        #: that ends without it was cut, and the answer is only what arrived —
+        #: the caller turns that into ``finish_reason="length"`` instead of
+        #: pretending the model finished talking (three cut answers on
+        #: 2026-11-18/19, the worst ending mid-sentence after "以下信息需要你确认：").
+        self.last_stream_finished = False
         for event, data in self._stream_post(C.CHAT_STREAM_PATH, body, self.cfg.request_timeout):
             try:
                 payload = json.loads(data)
@@ -682,4 +691,6 @@ class PolymasClient:
                                    code=payload.get("code"),
                                    trace_id=str(payload.get("traceId", "")),
                                    account=self._key)
+            if event == C.SSE_EVENT_FINISHED:
+                self.last_stream_finished = True
             yield event, payload
