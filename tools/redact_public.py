@@ -105,7 +105,6 @@ def main(argv: list[str]) -> int:
             "✅ 成立（容器名更新） |",
             "| `执行命令` 可执行 | 仍可执行（容器身份与宿主信息**不公开**） | ✅ 成立 |",
             1)
-        text = text.replace("/app/working", "工作目录")
         protocol.write_text(text, encoding="utf-8")
         print("  PROTOCOL.md：容器身份/宿主信息已脱敏")
 
