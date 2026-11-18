@@ -130,17 +130,58 @@ _ARG_KEYS = ("arguments", "args", "input", "parameters", "params", "argument")
 _NAME_CHARS = r'[^\s{}()\[\]"' + "'" + r'，,：:、。！？]+'
 
 #: ``CALL get_weather {"city":"北京"}`` — the documented form.
+#:
+#: Group 2 is everything after the name, arguments *and* whatever the model
+#: glued on behind them; :func:`_split_call_arguments` delimits the object.
+#: Anchoring the object to the end of the line used to drop the whole line when
+#: the model wrote ``CALL pwsh {...}已下发本机命令：…`` with no separator, and
+#: the call leaked into the answer as plain text (seen 2026-11-18).
 _CALL_LINE_RE = re.compile(
     r"^[ \t>*\-]*(?:" + CALL_MARKER + r"[ \t]*[:：]?[ \t]*)"
-    r"(" + _NAME_CHARS + r")[ \t]*(\{[^\n]*\})?[ \t]*$",
+    r"(" + _NAME_CHARS + r")(.*)$",
     re.MULTILINE,
 )
 #: A quoted name: ``CALL <执行命令> {...}`` or ``CALL 「执行命令」 {...}``.
 _CALL_LINE_QUOTED_RE = re.compile(
     r"^[ \t>*\-]*(?:" + CALL_MARKER + r"[ \t]*[:：]?[ \t]*)"
-    r"[<「【\[]([^\s<>\[\]「」【】]+)[>」】\]][ \t]*(\{[^\n]*\})?[ \t]*$",
+    r"[<「【\[]([^\s<>\[\]「」【】]+)[>」】\]](.*)$",
     re.MULTILINE,
 )
+
+
+def _split_call_arguments(rest: str) -> Tuple[str, str]:
+    """Split ``  {"a":1}tail`` into the JSON object and the text after it.
+
+    Brace depth decides where the object ends, honouring strings and escapes so
+    that a ``}`` inside a command cannot cut it short. Returns ``("", rest)``
+    when the line carries no object at all, which is how a bare ``CALL name``
+    is told apart from a real call.
+    """
+    text = rest.lstrip()
+    if not text.startswith("{"):
+        return "", ""
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[:index + 1], text[index + 1:].strip()
+    return "", ""
+
 _FENCE_RE = re.compile(r"```[ \t]*[A-Za-z0-9_+-]*[ \t]*\r?\n(.*?)```", re.DOTALL)
 
 
@@ -261,7 +302,7 @@ def parse_tool_calls(text: str) -> Tuple[str, List[ToolCall]]:
     # Quoted first: ``<名称>`` and ``「名称」`` must not keep their brackets.
     for regex in (_CALL_LINE_QUOTED_RE, _CALL_LINE_RE):
         for match in regex.finditer(text):
-            arguments = match.group(2)
+            arguments, _tail = _split_call_arguments(match.group(2))
             if not arguments:
                 continue
             payload = _loads(arguments)
@@ -273,9 +314,16 @@ def parse_tool_calls(text: str) -> Tuple[str, List[ToolCall]]:
                 raw_arguments=payload if isinstance(payload, dict) else {},
             ))
         if calls:
+            def drop_call_line(match: "re.Match[str]") -> str:
+                """Remove the call, keep any prose the model glued behind it."""
+                arguments, tail = _split_call_arguments(match.group(2))
+                if not arguments or _loads(arguments) is None:
+                    return match.group(0)  # not a call after all: leave the line
+                return tail
+
             remaining = text
             for regex in (_CALL_LINE_QUOTED_RE, _CALL_LINE_RE):
-                remaining = regex.sub("", remaining)
+                remaining = regex.sub(drop_call_line, remaining)
             # The model is told not to wrap the line in a fence (rule 3) but
             # sometimes does anyway. Removing the line then leaves an empty
             # pair of fences behind, and the client renders that as a stray

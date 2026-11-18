@@ -647,3 +647,48 @@ def test_the_rule_numbers_stay_sequential():
                if m]
     assert numbers, "一个编号都没抓到，这条断言会空转"
     assert numbers == list(range(1, len(numbers) + 1))
+
+# -- the call glued to the prose that follows it ----------------------------
+def test_a_call_glued_to_following_prose_is_still_a_call():
+    """No separator between the closing brace and the next sentence.
+
+    The model wrote ``CALL pwsh {...}已下发本机命令：…`` with nothing between the
+    brace and the prose (2026-11-18). A line-anchored pattern dropped the whole
+    line, so the call leaked into the answer as plain text and nothing ran.
+    """
+    line = ('CALL pwsh {"command": "echo hi"}已下发本机命令：核对编译链路真实耗时')
+    content, calls = parse_tool_calls(line)
+
+    assert [call.name for call in calls] == ["pwsh"]
+    assert json.loads(calls[0].arguments) == {"command": "echo hi"}
+    # The sentence the model wrote after the brace is the user's to read.
+    assert content.strip() == "已下发本机命令：核对编译链路真实耗时"
+
+
+def test_a_brace_inside_an_argument_does_not_end_the_object():
+    """Brace depth, not "the last } on the line", decides where the JSON ends."""
+    line = 'CALL pwsh {"command": "printf \\"}\\" && echo done"}接着说'
+    content, calls = parse_tool_calls(line)
+
+    assert len(calls) == 1
+    assert json.loads(calls[0].arguments)["command"] == 'printf "}" && echo done'
+    assert content.strip() == "接着说"
+
+
+def test_the_call_line_is_removed_even_with_prose_behind_it():
+    """The call itself must not survive into the content the client renders."""
+    text = "先跑个命令。\n\nCALL pwsh {\"command\": \"ls\"}跑完了再总结。"
+    content, calls = parse_tool_calls(text)
+
+    assert len(calls) == 1
+    assert "CALL" not in content
+    assert "先跑个命令" in content
+    assert "跑完了再总结" in content
+
+
+def test_a_call_without_arguments_is_left_alone():
+    """A bare ``CALL name`` is not a call; the line stays in the text."""
+    content, calls = parse_tool_calls("CALL foo")
+
+    assert calls == []
+    assert content.strip() == "CALL foo"
