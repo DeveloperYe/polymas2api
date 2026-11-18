@@ -20,6 +20,8 @@ __all__ = [
     "SSE_EVENT_TOOL_REQUEST",
     "SSE_EVENT_TOOL_RESPONSE",
     "SSE_EVENT_DEEP_RAG",
+    "MODEL_CONTEXT_LENGTHS",
+    "DEFAULT_CONTEXT_LENGTH",
 ]
 
 #: Base URL of every business endpoint.
@@ -80,3 +82,52 @@ SSE_EVENT_TOOL_REQUEST = "TOOL_REQUEST"
 SSE_EVENT_TOOL_RESPONSE = "TOOL_RESPONSE"
 #: Knowledge-base retrieval progress; carries no content of its own.
 SSE_EVENT_DEEP_RAG = "DEEP_RAG_REASONING"
+
+#: Declared context window per model, in tokens.
+#:
+#: The platform's catalogue does **not** carry this: its rows are
+#: ``modelCode / modelName / alias / default / reasoningEffort / multimodal /
+#: source / limitedFree`` and nothing else (measured 2026-11-18). So the number
+#: has to come from the vendor documentation, keyed by model code, and it is a
+#: declaration rather than something this gateway can verify.
+#:
+#: Sources, checked 2026-11-18:
+#:   deepseek-v4.1-flash  DeepSeek API docs, "CONTEXT LENGTH: 1M" for
+#:                        DeepSeek-V4.1-Flash-1017 (MAX OUTPUT 384K);
+#:                        Volcengine Ark lists the same model at 1024K.
+#:   deepseek-v3          DeepSeek-V3, 128K (historical; the model is retired
+#:                        from DeepSeek's own price list but still selectable here).
+#:   qwen3.8-max          Alibaba Cloud Model Studio: 1M (max output 128K).
+#:   qwen3.8-flash        1M (max output 128K).
+#:   qwen3.7-max          1M.
+#:   qwen3.6-plus         1M (max output 64K).
+#:   Doubao-Seed-2.1-pro  Volcengine Ark: 1024K.
+#:   Doubao-Seed-2.1-turbo  256K.
+#:   Doubao-Seed-2.0-mini   256K.
+#:   Doubao-Seed-2.0-pro    256K.
+#:   doubao-seed-evolving   1024K.
+#:   Doubao-Seed-1.8      not found - the model is off the Ark listing, so the
+#:                        256K of its generation is assumed.
+#:
+#: A wrong value here does not corrupt anything; it moves the point where a
+#: client decides to compact. Keys are matched case-insensitively.
+MODEL_CONTEXT_LENGTHS = {
+    "deepseek-v4.1-flash": 1000000,
+    "deepseek-v3": 131072,
+    "qwen3.8-max": 1000000,
+    "qwen3.8-flash": 1000000,
+    "qwen3.7-max": 1000000,
+    "qwen3.6-plus": 1000000,
+    "doubao-seed-2.1-pro": 1048576,
+    "doubao-seed-2.1-turbo": 262144,
+    "doubao-seed-2.0-mini": 262144,
+    "doubao-seed-2.0-pro": 262144,
+    "doubao-seed-1.8": 262144,
+    "doubao-seed-evolving": 1048576,
+}
+
+#: Used when the platform does not declare a length and the table above has no
+#: entry. The platform accepted a 1,500,000-character prompt and failed at
+#: 1,600,000 (docs/LIMITS.md §1), so 1M is the declared working figure.
+DEFAULT_CONTEXT_LENGTH = 1000000
+

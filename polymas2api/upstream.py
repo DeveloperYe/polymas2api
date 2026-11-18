@@ -491,6 +491,29 @@ class PolymasClient:
         except UpstreamError as error:
             self.log(f"the platform catalogue is unavailable: {error}")
 
+        def context_length(item: Dict[str, Any]) -> int:
+            """Tokens this model can hold: platform claim, else the vendor table.
+
+            The platform does not send one today, but a client that reads a
+            model listing from here benefits from having it, so keep looking in
+            the field names other catalogues use before falling back.
+            """
+            for container in (item, item.get("ext") or {}, item.get("meta") or {}):
+                if not isinstance(container, dict):
+                    continue
+                for key in ("contextLength", "context_length", "contextWindow",
+                            "context_window", "maxInputTokens", "max_input_tokens",
+                            "maxContextTokens", "max_context_tokens"):
+                    value = container.get(key)
+                    if isinstance(value, int) and value > 0:
+                        return value
+            for key in (item.get("modelCode"), item.get("modelName"), item.get("alias")):
+                if isinstance(key, str):
+                    known = C.MODEL_CONTEXT_LENGTHS.get(key.strip().lower())
+                    if known:
+                        return known
+            return C.DEFAULT_CONTEXT_LENGTH
+
         def describe(item: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 "modelCode": item.get("modelCode"),
@@ -501,6 +524,7 @@ class PolymasClient:
                 "multimodal": bool(item.get("multimodal")),
                 "source": item.get("source"),
                 "limitedFree": bool(_limited_free(item.get("ext"))),
+                "contextLength": context_length(item),
             }
 
         agent_described = [describe(item) for item in agent_list if item.get("modelCode")]

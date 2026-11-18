@@ -1184,6 +1184,50 @@ Windows 把客户端中止连接报成 `WinError 10053`（`ConnectionAbortedErro
 | 项目 | 结果 |
 |---|---|
 | `/v1/models` | 12 个模型，`switchable: true` |
+
+### `/v1/models` 的 `context_length` 字段（2026-11-18 新增）
+
+平台的模型目录**不声明上下文长度**。实测原始返回每条只有 8 个字段：
+
+```
+modelCode / modelName / alias / default / reasoningEffort / multimodal / source / limitedFree
+```
+
+而客户端要靠它决定"上下文用了百分之几、什么时候压缩"——比如 DSH 的
+`dsh-compaction-basic` 在没有 `contextWindow` 时直接抛
+`no context capacity for <provider>/<model>`，自动压缩全部失效。
+
+所以网关自己补了一个 `context_length`，取值顺序：
+
+1. **平台声明了就用平台的**（找 `contextLength` / `context_length` /
+   `contextWindow` / `context_window` / `maxInputTokens` / `max_input_tokens` /
+   `maxContextTokens`，以及 `ext` / `meta` 子对象里的同名键）——今天用不上，
+   但平台哪天加上就自动生效；
+2. 否则查 `polymas2api/constants.py` 的 `MODEL_CONTEXT_LENGTHS`（厂商文档值）；
+3. 否则 `DEFAULT_CONTEXT_LENGTH = 1_000_000`。
+
+| 模型 | context_length | 来源（2026-11-18 核对） |
+|---|---:|---|
+| `deepseek-v4.1-flash` | 1,000,000 | DeepSeek 官方文档 CONTEXT LENGTH: 1M（同款在火山方舟标 1024K） |
+| `deepseek-v3` | 131,072 | DeepSeek-V3 128K（历史值） |
+| `qwen3.8-max` / `qwen3.8-flash` | 1,000,000 | 阿里云百炼模型文档 |
+| `qwen3.7-max` / `qwen3.6-plus` | 1,000,000 | 同上 |
+| `Doubao-Seed-2.1-pro` | 1,048,576 | 火山方舟 1024K |
+| `doubao-seed-evolving` | 1,048,576 | 火山方舟 1024K |
+| `Doubao-Seed-2.1-turbo` / `2.0-mini` / `2.0-pro` | 262,144 | 火山方舟 256K |
+| `Doubao-Seed-1.8` | 262,144 | **未查到**（已从方舟列表下线），按同代 256K 推定 |
+
+响应里同时出现在两个位置，方便不同客户端：
+
+```json
+{"id": "deepseek-v4.1-flash", "object": "model", "owned_by": "polymas",
+ "context_length": 1000000,
+ "polymas": {"reasoningEffort": "low,high,max", "multimodal": true,
+             "contextLength": 1000000, ...}}
+```
+
+> ⚠️ 这是**声明值**，不是网关能验证的事实。值错不会损坏任何东西，只会挪动
+> 客户端决定压缩的时间点。`Doubao-Seed-1.8` 那条是推定值，其余都有出处。
 | 非流式对话 | 3.8s，回答正确 |
 | 流式对话 | 3.5s（首包 2.9s），31 帧 |
 | 工具桥接 | 3.8s，正确发出 `CALL pwsh {…}` |

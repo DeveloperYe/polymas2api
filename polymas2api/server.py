@@ -456,11 +456,19 @@ class Gateway:
                     "object": "model",
                     "created": int(time.time()),
                     "owned_by": "polymas",
+                    # The platform sends no context length, so this is the
+                    # declared figure from constants.MODEL_CONTEXT_LENGTHS (or
+                    # the 1M fallback). Clients that size a context window from
+                    # a model listing read this key — dsh-llm-pi-ai accepts
+                    # context_length / context_window / max_input_tokens /
+                    # limit.context, measured in its model discovery.
+                    "context_length": item.get("contextLength") or C.DEFAULT_CONTEXT_LENGTH,
                     "polymas": {"alias": item.get("alias"), "default": item.get("default"),
                                 "reasoningEffort": item.get("reasoningEffort"),
                                 "multimodal": item.get("multimodal"),
                                 "source": item.get("source"),
-                                "limitedFree": item.get("limitedFree")},
+                                "limitedFree": item.get("limitedFree"),
+                                "contextLength": item.get("contextLength")},
                 }
                 for item in (catalogue.get("available") or catalogue["models"])
             ],

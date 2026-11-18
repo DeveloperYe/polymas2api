@@ -996,6 +996,59 @@ def test_the_effective_model_is_never_the_word_auto():
                               "data": [{"id": "deepseek-v4.1-flash"}]}
     gateway._effective_model_cache = ""
     assert gateway._effective_model() == "deepseek-v4.1-flash"
+
+
+# -- context length in the model listing ------------------------------------
+def test_the_model_listing_declares_a_context_length():
+    """The platform sends none, so the vendor table fills it in.
+
+    A client that sizes its context window from a model listing needs this:
+    dsh-llm-pi-ai reads ``context_length`` / ``context_window`` /
+    ``max_input_tokens`` / ``limit.context`` (2026-11-18). The platform's own
+    rows carry only modelCode / modelName / alias / default / reasoningEffort /
+    multimodal / source / limitedFree, so without the table compaction can
+    never decide when to fire.
+    """
+    from polymas2api.upstream import PolymasClient
+
+    client = PolymasClient(Config(), Credential(uid="t", ai_poly="token", jt_cas="",
+                                               user_nid="u", friend_nid="f"))
+    client._get = lambda path, params=None: {"models": [
+        {"modelCode": "deepseek-v4.1-flash", "modelName": "Deepseek-v4.1-flash"},
+        {"modelCode": "Doubao-Seed-2.1-turbo", "modelName": "Doubao-Seed-2.1-turbo"},
+        {"modelCode": "a-model-nobody-listed", "modelName": "新模型"},
+    ]}
+    lengths = [item["contextLength"] for item in client.models()["models"]]
+    assert lengths == [1000000, 262144, 1000000], lengths
+
+
+def test_a_context_length_the_platform_declares_wins():
+    """If the platform ever starts reporting one, the table must not override it."""
+    from polymas2api.upstream import PolymasClient
+
+    client = PolymasClient(Config(), Credential(uid="t", ai_poly="token", jt_cas="",
+                                               user_nid="u", friend_nid="f"))
+    client._get = lambda path, params=None: {"models": [
+        {"modelCode": "deepseek-v4.1-flash", "contextLength": 65536},
+    ]}
+    assert client.models()["models"][0]["contextLength"] == 65536
+
+
+def test_the_openai_listing_exposes_the_context_length():
+    """``/v1/models`` must carry the key at the top level, not only under polymas."""
+    from polymas2api.server import Gateway
+
+    class _Stub:
+        def models(self):
+            return {"models": [{"modelCode": "deepseek-v4.1-flash", "modelName": "Deepseek-v4.1-flash",
+                                "default": True, "contextLength": 1000000}],
+                    "available": [], "switchable": True}
+
+    gateway = Gateway(Config())
+    gateway._acquire = lambda model=None: (object(), _Stub())
+    listing = gateway.models(refresh=True)
+    assert listing["data"][0]["context_length"] == 1000000
+    assert listing["data"][0]["polymas"]["contextLength"] == 1000000
 # -- continuing after a tool result -----------------------------------------
 def test_a_tool_result_marks_the_turn_as_a_continuation():
     """The reply to a tool result is prose, so no hold and no retry.
