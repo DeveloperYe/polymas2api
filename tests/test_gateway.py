@@ -1049,6 +1049,23 @@ def test_the_openai_listing_exposes_the_context_length():
     listing = gateway.models(refresh=True)
     assert listing["data"][0]["context_length"] == 1000000
     assert listing["data"][0]["polymas"]["contextLength"] == 1000000
+
+
+def test_the_body_cap_can_carry_what_the_platform_accepts():
+    """The gateway must not be the binding limit.
+
+    The platform answered a 1,500,000-character prompt and failed at
+    1,600,000 (docs/LIMITS.md §1). UTF-8 Chinese is three bytes per character,
+    so that is ~4.5 MB before JSON overhead. At the old 1 MiB the gateway
+    rejected prompts the platform would have answered, and a client that
+    compacts on a percentage of the context window could never reach its
+    threshold: dsh-token-meter counts a flat four characters per token, so 80%
+    of a 1M window is 3.2M characters.
+    """
+    from polymas2api.server import MAX_BODY_BYTES
+
+    assert MAX_BODY_BYTES >= 5 * 1024 * 1024, "must carry 1.5M Chinese characters"
+    assert MAX_BODY_BYTES <= 16 * 1024 * 1024, "stays bounded; the body is read into memory"
 # -- continuing after a tool result -----------------------------------------
 def test_a_tool_result_marks_the_turn_as_a_continuation():
     """The reply to a tool result is prose, so no hold and no retry.

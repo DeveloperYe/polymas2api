@@ -51,9 +51,18 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; "
        "connect-src 'self'; img-src 'self' data:; form-action 'none'; "
        "frame-ancestors 'none'; base-uri 'none'")
 
-#: Hard ceiling on a request body. A chat prompt with a long conversation
-#: is a few tens of kilobytes; a megabyte is generous.
-MAX_BODY_BYTES = 1 << 20
+#: Hard ceiling on a request body.
+#:
+#: Raised from 1 MiB on 2026-11-18. The platform itself accepted a
+#: 1,500,000-character prompt and failed at 1,600,000 (docs/LIMITS.md §1), so
+#: UTF-8 Chinese at 3 bytes per character needs about 4.5 MB just to be able to
+#: ask. At 1 MiB the gateway was the binding limit by a factor of four to nine,
+#: and clients that compact on a context-window percentage could never reach
+#: their threshold: dsh-token-meter counts a flat four characters per token, so
+#: its 80% of a 1M window is 3.2M characters — twice what the platform takes.
+#: 8 MiB carries ~2.7M Chinese characters, comfortably past the platform's own
+#: ceiling, so the platform decides and not us.
+MAX_BODY_BYTES = 8 << 20
 
 
 class Logger:
