@@ -781,8 +781,14 @@ class Gateway:
                         yield chunk
                         continue
                     buffered.append(chunk)
-                    # Clearly prose: release and stream from here on.
-                    if hold_limit and content > hold_limit:
+                    # Either condition settles the question this hold exists to
+                    # answer. Prose past the limit cannot be a claim-without-call
+                    # shape, and a parsed call means the retry can no longer
+                    # fire at all. Holding a call back only delays the client —
+                    # with the persona emitting the call on its first line, a
+                    # short answer would otherwise stay invisible for the whole
+                    # generation (reported 2026-11-19 as "nothing was output").
+                    if delta.get("tool_calls") or (hold_limit and content > hold_limit):
                         for pending in buffered:
                             yield pending
                         _release()

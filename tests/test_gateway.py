@@ -2406,3 +2406,53 @@ def test_the_persona_routes_user_questions_through_the_call_protocol():
 
     assert "ask_user_question" in RULES
     assert "不要只在正文里写" in RULES
+
+
+# -- the hold releases as soon as a call is parsed (2026-11-19) ------------
+
+
+def test_a_parsed_call_releases_the_held_answer_immediately():
+    """A hold exists to catch a claim-without-call; a call ends the question.
+
+    With the persona emitting the call on its first line, a short answer never
+    crossed the 240-character limit, so the whole reply stayed buffered to the
+    end of the generation and the client saw nothing while it ran (reported
+    2026-11-19). Once a call is parsed the retry cannot fire, so releasing on
+    sight costs nothing and restores live streaming.
+    """
+    gateway = _gw()
+    observed = {}
+
+    class _Watching:
+        def stream(self, client, prompt, **kwargs):
+            yield _chunk({"content": "我来执行。"})
+            yield _chunk({"tool_calls": [{"index": 0, "id": "call_1",
+                                          "type": "function",
+                                          "function": {"name": "pwsh",
+                                                       "arguments": "{}"}}]})
+            # Reached only when the consumer asks for more: if the gateway is
+            # still holding, the answer is over before anything is emitted.
+            observed["advanced"] = True
+            yield _chunk({}, "stop")
+
+    gateway.adapter = lambda client, names=None: _Watching()
+    stream = gateway._stream_with_journal(
+        _Account(), None, "prompt", "m", "s", TOOLS_ONE, ["pwsh"])
+    first = next(stream)
+    assert "advanced" not in observed, "the call must go out as it arrives"
+    assert first["choices"][0]["delta"].get("content") == "我来执行。"
+    assert list(stream) is not None   # drain without error
+
+
+def test_a_prose_answer_below_the_limit_is_still_held():
+    """The safety net stays: a short answer with no call may still be retried."""
+    gateway = _gw()
+    adapter = _Scripted(
+        [_chunk({"content": "我已经帮你创建好了。"}), _chunk({}, "stop")],
+        [_chunk({"content": 'CALL pwsh {"command": "mkdir x"}'}), _chunk({}, "stop")],
+    )
+    _drain(gateway, adapter)
+    # A scripted adapter cannot parse a CALL out of text, so the corrective
+    # passes never satisfy `_retry_wins`; what matters here is that the hold
+    # still bought the retry at all.
+    assert adapter.calls >= 2, "a claim without a call is still corrected"
