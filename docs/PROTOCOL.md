@@ -14,17 +14,9 @@
 | IM 实时通道 | `wss://cloudapi.polymas.com/socket/api/chat/{userNid}/{friendNid}` |
 | `openapi.polymas.com` | **死域名**：实测 `/v1/chat/completions` → `404 No static resource` |
 
-沙箱（执行命令跑在哪）：`GET /ai-agent/sandbox/admin/config` 返回
+沙箱（「执行命令」跑在哪）：与平台后端、与模型调用都是独立的一层，**只执行命令，不参与模型推理**。因此沙箱内做进程/网络探测拿不到模型端点（也拿不到它的鉴权），agent 本身也会拒绝 `ps`/`ss`/`/proc` 这类基础设施探测。它的具体部署形态属于平台内部信息，本文不记录。
 
-```
-apiBaseUrl : https://api.cn-hangzhou.e2b.fc.aliyuncs.com
-templateId : polymas-agent-09021607     runUser : root     timeout : 7200
-nasMounts  : 工作目录（阿里云 NAS）
-```
-
-即 agent 的「执行命令」跑在**阿里云函数计算上的 E2B 沙箱**里，与平台后端、与模型调用都是分开的：沙箱只执行命令，不参与模型推理。所以沙箱内的进程/网络探测拿不到模型端点（也拿不到它的鉴权），且 agent 本身会拒绝 `ps`/`ss`/`/proc` 这类基础设施探测。
-
-接口全貌：`GET /ai-agent/v3/api-docs` 直接返回 **OpenAPI 3.1**（232 个接口），是本仓库理解平台最完整的来源。**该清单只留在本地 `work/ai-agent-openapi.json`，不随本仓库发布**——它把平台的整套接口面（含管理接口）一次列全，公开出去等于替别人省掉摸索成本。chat 面只有 `/assistant/v1/chat/{stream,new,resume,confirm,abandoned,active/list}`，**不存在** `/chat/completions`、`/completions`、`/inference`（文档 + 逐个探测双向确认）。管理类接口 `/agent/token-usage/*`、`/agent/tool-request-log/*` 对学生账号返回 403。
+接口面：chat 只有 `/assistant/v1/chat/{stream,new,resume,confirm,abandoned,active/list}`，**不存在** `/chat/completions`、`/completions`、`/inference`（文档 + 逐个探测双向确认）。管理类接口（用量统计、工具调用日志）对学生账号返回 403。
 
 平台**没有任何 OpenAI 兼容端点**。前端常量表里有 `openApiHost:"openapi.polymas.com"`，但 404 个 JS bundle 里该字符串只出现 1 次（就是常量定义本身），没有任何 URL 模板用到它。
 
