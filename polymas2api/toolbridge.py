@@ -294,6 +294,85 @@ def _repair_escapes(text: str) -> str:
     return "".join(out)
 
 
+#: Control characters, i.e. what a *legal* JSON escape decodes to.
+_CONTROL_RE = re.compile(r"[\x00-\x1f]")
+
+#: A value that starts like a Windows or UNC path.
+_PATH_VALUE_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\[^\\])")
+
+#: Argument names that hold a location rather than prose.
+_PATH_KEY_RE = re.compile(
+    r"(path|file|dir|folder|workdir|cwd|root|src|source|dest|dst|target)", re.I)
+
+
+def _doubles_legal_escapes(text: str) -> str:
+    r"""Double ``\b \f \n \r \t`` so a path keeps the backslashes it needs.
+
+    ``C:\new\test.txt`` is *legal* JSON: ``\n`` is a newline and ``\t`` a tab,
+    so a strict parse succeeds and hands the caller ``C:<LF>ew<HT>est.txt``
+    without an error. A left-to-right scan avoids the trap that breaks ``\\``
+    (see :func:`_repair_escapes`).
+    """
+    out: List[str] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char != "\\":
+            out.append(char)
+            index += 1
+            continue
+        following = text[index + 1] if index + 1 < length else ""
+        if following and following in "bfnrt":
+            out.append("\\\\" + following)   # -> \\n in the JSON text
+            index += 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _looks_like_a_location(key: Any, value: str) -> bool:
+    """Whether a string is a filesystem location rather than prose."""
+    return bool(_PATH_VALUE_RE.match(value) or _PATH_KEY_RE.search(str(key or "")))
+
+
+def _repair_mangled_paths(value: Any, text: str) -> Any:
+    r"""Give back the backslashes a legal escape stole from a path argument.
+
+    Reparses with every ``\b \f \n \r \t`` doubled and takes the result **only
+    for the arguments that lost one**, so prose that really does carry a
+    newline (``content`` written as a multi-line file) is left alone.
+
+    Measured 2026-11-19: four of five Windows paths lost characters this way
+    (``C:\new`` -> newline, ``C:\bin`` -> backspace, ``C:\robots`` -> two
+    carriage returns) and nothing reported an error.
+    """
+    if not isinstance(value, dict):
+        return value
+    mangled = [key for key, item in value.items()
+               if isinstance(item, str) and _CONTROL_RE.search(item)]
+    if not mangled:
+        return value
+    try:
+        repaired = json.loads(_doubles_legal_escapes(text.strip()))
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return value
+    if not isinstance(repaired, dict):
+        return value
+    merged = dict(value)
+    for key in mangled:
+        candidate = repaired.get(key)
+        if not isinstance(candidate, str) or _CONTROL_RE.search(candidate):
+            continue
+        # Take the repair when the argument reads as a location, or when the
+        # repair is what reveals one (a path buried inside a command string).
+        if _looks_like_a_location(key, value[key]) \
+                or _PATH_VALUE_RE.search(candidate):
+            merged[key] = candidate
+    return merged
+
+
 def _loads(text: str) -> Any:
     r"""Decode a call's arguments, tolerating a stray backslash.
 
@@ -301,13 +380,23 @@ def _loads(text: str) -> Any:
     nothing that parses today can change meaning. Only when that fails is each
     illegal escape doubled — which is what the model meant — so ``\.exe``
     reaches the command as ``\\.exe`` instead of dropping the call.
+
+    A *successful* parse is still not the end of the story: ``\n`` inside a
+    Windows path is legal and therefore silently wrong. :func:`_repair_mangled_paths`
+    checks the decoded values for the control characters that only a path could
+    have lost and takes the double-escaped reading for those arguments.
     """
+    stripped = text.strip()
     try:
-        return json.loads(text.strip())
+        return _repair_mangled_paths(json.loads(stripped), stripped)
     except (json.JSONDecodeError, TypeError, AttributeError):
         pass
     try:
-        return json.loads(_repair_escapes(text.strip()))
+        repaired = _repair_escapes(stripped)
+        # Hand the *repaired* text on: a path can carry both an illegal escape
+        # and a legal-but-wrong one (``C:\temp\a.log`` has ``\a`` and ``\t``),
+        # and the guard has to see the text with the illegal ones already fixed.
+        return _repair_mangled_paths(json.loads(repaired), repaired)
     except (json.JSONDecodeError, TypeError, AttributeError):
         return None
 
@@ -697,7 +786,7 @@ def build_tool_prompt(tools: Sequence[Dict[str, Any]],
     lines: List[str] = [
         "[调用参数整理]",
         "你的回答会由一个外部程序读取。当用户的请求需要下面这些能力时，",
-        "不要自己编造结果，也不要解释，而是在回复最后单独用一行给出调用参数，",
+        "不要自己编造结果，也不要解释，而是在回复最前面单独用一行给出调用参数，",
         "由那个程序去真正执行：",
         "",
         "CALL 工具名 {\"参数名\": \"参数值\"}",
@@ -711,8 +800,14 @@ def build_tool_prompt(tools: Sequence[Dict[str, Any]],
         "要求：",
         "1. 这一行以 CALL 加空格开头，后面是工具名和一段单行 JSON。",
         "2. 参数必须符合上面给出的结构，JSON 用双引号。",
-        "3. 这一行放在回复最后；它不需要代码块包裹，也不要加引号或其它标记。",
-        "4. 如果一次需要多个工具，只给出最需要先执行的那一个。",
+        "3. 这一行必须是回复的最前面：它之前不能有任何文字、标题、空行或代码块标记；",
+        "   这一行之外不需要代码块包裹，也不要加引号。写完这一行可以继续写正文说明。",
+        # 并行能力早就具备（parse_tool_calls 返回列表、响应层逐个下发），
+        # 是这条规则把它白关掉了。互不依赖时多写几行能省整轮往返；
+        # 有依赖时仍必须串行，否则第二个调用的参数无从写起。
+        "4. 多个调用互不依赖时，可以在最前面连续写多行 CALL（最多 4 行），",
+        "   每行一个调用、各自带完整 JSON；后一个依赖前一个的结果时（例如先列目录",
+        "   再读其中某个文件），只写第一个，等结果回来再继续。",
         "5. 不需要任何工具时，正常回答，不要输出 CALL 行。",
         "6. 调用参数由外部程序执行，你把参数整理正确即可。",
         "7. 工具名**必须逐字照抄**上面列出的那个名字：不要翻译、不要改写成别的",

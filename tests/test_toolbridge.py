@@ -746,3 +746,90 @@ def test_valid_json_is_never_rewritten():
     assert len(calls) == 1
     # \n stays an escape, not a literal backslash-n.
     assert json.loads(calls[0].arguments)["command"] == "echo a\nb"
+
+
+# -- a Windows path must survive the JSON escapes that are legal (2026-11-19)
+
+
+def _path_of(raw: str) -> str:
+    from polymas2api.toolbridge import parse_tool_calls
+
+    _body, calls = parse_tool_calls(raw)
+    assert calls, "the call should parse"
+    arguments = calls[0].arguments
+    if isinstance(arguments, str):
+        import json
+        arguments = json.loads(arguments)
+    return str(arguments.get("path"))
+
+
+def test_a_windows_path_keeps_its_backslashes():
+    r"""``\n`` ``\t`` ``\b`` ``\f`` ``\r`` are *legal* JSON, so a path using them
+    parses fine and comes out wrong — no error, just a path that no longer
+    exists. Measured 2026-11-19: four of five lost characters this way.
+    """
+    cases = [
+        (r'CALL read {"path":"C:\new\test.txt"}', r"C:\new\test.txt"),
+        (r'CALL read {"path":"C:\bin\tool.exe"}', r"C:\bin\tool.exe"),
+        (r'CALL read {"path":"C:\temp\a.log"}', r"C:\temp\a.log"),
+        (r'CALL read {"path":"C:\robots\rules.txt"}', r"C:\robots\rules.txt"),
+        (r'CALL read {"path":"C:\file\notes.md"}', r"C:\file\notes.md"),
+    ]
+    for raw, expected in cases:
+        assert _path_of(raw) == expected, raw
+
+
+def test_a_correctly_escaped_path_is_left_alone():
+    r"""Nothing that parses to a sane path may be rewritten."""
+    assert _path_of(r'CALL read {"path":"D:\\work\\ok.txt"}') == r"D:\work\ok.txt"
+
+
+def test_a_real_newline_in_prose_is_not_turned_into_an_escape():
+    """Only location-shaped arguments get the double-escaped reading.
+
+    A file body written as ``content`` legitimately carries newlines; rewriting
+    them into a literal ``\\n`` would corrupt the file being written.
+    """
+    from polymas2api.toolbridge import parse_tool_calls
+
+    _body, calls = parse_tool_calls(r'CALL write {"path":"a.txt","content":"l1\nl2"}')
+    import json
+    arguments = calls[0].arguments
+    if isinstance(arguments, str):
+        arguments = json.loads(arguments)
+    assert arguments["content"] == "l1\nl2", "the newline must stay a newline"
+
+
+def test_the_tool_block_puts_the_call_where_the_persona_does():
+    """Two instructions used to disagree: the block said "reply end", the
+    persona says "first line". Whatever wins, the model should not be asked to
+    choose (2026-11-19, reported from a sibling project).
+    """
+    from polymas2api.toolbridge import build_tool_prompt
+
+    specs = [{"type": "function",
+              "function": {"name": "pwsh", "description": "执行命令",
+                           "parameters": {"type": "object",
+                                          "properties": {"command": {"type": "string"}},
+                                          "required": ["command"]}}}]
+    block = build_tool_prompt(specs)
+    text = block[0] if isinstance(block, tuple) else block
+    assert "最前面" in text
+    assert "放在回复最后" not in text
+
+
+def test_the_tool_block_allows_independent_calls_in_parallel():
+    """The parser and the response layer always handled several calls at once;
+    one prompt rule alone was closing the door.
+    """
+    from polymas2api.toolbridge import build_tool_prompt
+
+    specs = [{"type": "function",
+              "function": {"name": "pwsh", "description": "执行命令",
+                           "parameters": {"type": "object",
+                                          "properties": {"command": {"type": "string"}},
+                                          "required": ["command"]}}}]
+    block = build_tool_prompt(specs)
+    text = block[0] if isinstance(block, tuple) else block
+    assert "多行 CALL" in text
+    assert "只给出最需要先执行的那一个" not in text
