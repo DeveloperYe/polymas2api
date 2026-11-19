@@ -868,3 +868,48 @@ def test_a_four_level_tool_names_its_leaf_fields():
     text = block[0] if isinstance(block, tuple) else block
     assert "rolling:object{batch:integer pause:string}" in text, \
         "the leaf fields must survive the compacted render"
+
+
+# -- a closed set must be visible in the compacted signature (2026-11-19) --
+
+
+def test_a_compacted_signature_names_its_enum_members():
+    """Type alone is not enough: the model invents a value.
+
+    Measured 2026-11-19: ``mode`` accepting turbo/standard/thorough rendered as
+    ``mode:string`` and the model wrote ``accurate``/``fast``/``quick``, ten of
+    ten invalid across two prompts, where the full schema got all ten right.
+    Naming the members costs 59 characters and recovered 15/15.
+    """
+    from polymas2api.toolbridge import _compact_parameters
+
+    schema = {"type": "object", "required": ["mode"],
+              "properties": {"mode": {"type": "string",
+                                      "enum": ["turbo", "standard", "thorough"]},
+                             "text": {"type": "string"}}}
+    signature = _compact_parameters(schema)
+
+    assert "mode:string*[turbo|standard|thorough]" in signature
+    assert "text:string" in signature
+
+
+def test_a_long_enum_is_abbreviated_rather_than_pasted_whole():
+    """Twelve locales would cost more than the field is worth."""
+    from polymas2api.toolbridge import _compact_parameters
+
+    schema = {"type": "object", "properties": {
+        "lang": {"type": "string",
+                 "enum": ["zh-CN", "en-US", "ja-JP", "ko-KR", "fr-FR",
+                          "de-DE", "es-ES", "ru-RU"]}}}
+    signature = _compact_parameters(schema)
+
+    assert signature.startswith("lang:string[zh-CN|en-US|ja-JP")
+    assert signature.endswith("…]")
+    assert "ru-RU" not in signature
+
+
+def test_an_open_field_gets_no_enum_hint():
+    from polymas2api.toolbridge import _compact_parameters
+
+    assert _compact_parameters({"type": "object",
+                                "properties": {"q": {"type": "string"}}}) == "q:string"

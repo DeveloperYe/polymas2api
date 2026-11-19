@@ -31,7 +31,7 @@ from .journal import Journal, JournalEntry
 from . import agent_persona
 from .persona import NameScrubber
 from .tokens import usage_for
-from .toolbridge import build_tool_prompt, declared_names
+from .toolbridge import SCHEMA_DEPTH, build_tool_prompt, declared_names
 from .pool import Credential, CredentialPool, PoolError
 from .renewal import RenewalError, TokenRenewer, fetch_token
 from .sanitize import Sanitizer
@@ -701,7 +701,7 @@ class Gateway:
             choice = (body or {}).get("tool_choice", (body or {}).get("function_call"))
             extra, aliases = build_tool_prompt(
                 tools, choice, getattr(self.cfg, "tool_name_style", "verbatim"),
-                int(getattr(self.cfg, "tool_schema_depth", 2) or 0))
+                int(getattr(self.cfg, "tool_schema_depth", SCHEMA_DEPTH) or 0))
         prompt = OpenAIAdapter.extract_prompt(
             messages, extra_system=extra,
             local_images=bool(getattr(self.cfg, "local_image_attachments", True)))
@@ -1524,6 +1524,9 @@ class Gateway:
             "journal_size": (1, 100000),
             "tool_stream_buffer_chars": (0, 100000),
             "tool_stream_hold_seconds": (0.0, 600.0),
+            # 深度决定嵌套参数能不能被填对（见 docs/PROTOCOL.md 3.3.1）：
+            # 放到 999 会退回 113K 字符的完整展开，负数会退化成平铺。
+            "tool_schema_depth": (0, 6),
         }
         for key, (low, high) in bounds.items():
             if key not in applied:

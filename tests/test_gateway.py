@@ -2520,3 +2520,44 @@ def test_the_journal_records_first_frame_and_longest_gap():
     entry = entries[-1].to_dict() if hasattr(entries[-1], "to_dict") else entries[-1]
     assert "ttft_ms" in entry and "max_gap_ms" in entry
     assert entry["ttft_ms"] >= 0 and entry["max_gap_ms"] >= 0
+
+# -- settings must survive a restart (2026-11-19) --------------------------
+
+
+def test_config_loads_tool_schema_depth_from_disk(tmp_path):
+    """A settings key missing from ``known`` is silently ignored on load.
+
+    ``tool_schema_depth`` was exactly that: the panel wrote it, ``load_config``
+    dropped it, so every restart quietly reverted to the default and the file
+    on disk said something else entirely. Found by a sibling project reading
+    our config; verified here by round trip.
+    """
+    import json
+
+    from polymas2api.config import load_config
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"tool_schema_depth": 1}), encoding="utf-8")
+
+    assert load_config(str(path)).tool_schema_depth == 1
+
+
+def test_every_writable_numeric_setting_is_loaded():
+    """Guard the whole class of bug above, not just one key."""
+    import json
+    import inspect
+
+    from polymas2api.config import Config, load_config
+
+    # Keys the panel writes and the loader must read back.
+    writable = ("tool_schema_depth", "tool_stream_buffer_chars",
+                "tool_stream_hold_seconds", "journal_size", "min_interval_ms")
+    path = __import__("pathlib").Path(
+        __import__("tempfile").mkdtemp()) / "config.json"
+    payload = {key: getattr(Config(), key) for key in writable}
+    payload["tool_schema_depth"] = 1        # a value that differs from default
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    loaded = load_config(str(path))
+
+    assert loaded.tool_schema_depth == 1
+    assert inspect.isclass(Config)

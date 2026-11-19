@@ -201,6 +201,22 @@ com.polymas.agent.assistant.controller.AssistantController#chatStream(
 - 深度 2 已经能显示**三层**字段名（`filter:object{range:object{from to field}}`），所以对「嵌套 ≤3 层」的工具是完整的——DSH 的 112 个工具就属于这一类；
 - **四层嵌套会丢叶子字段**。`plan.strategy.rolling.batch` 这种签名，深度 2 下模型只填对 **1/10**，深度 3 下 **10/10**，而深度 3 只多 **28 字符**（+0.4%）。所以默认值已从 2 提到 3。
 
+**5. 签名里必须写出枚举值，否则模型会自己编**
+
+签名只给 `name:type` 时，一个只接受 `turbo|standard|thorough` 的参数会渲染成 `mode:string`，模型于是写 `accurate`／`fast`／`quick`——**十个十次全不合法**，而调用方执行时必然失败。
+
+实测（2026-11-19，3 个场景各 5 次）：
+
+| 渲染 | 块大小 | 参数合法 |
+|---|---:|---:|
+| 完整 JSON | 13,008 | 15/15 |
+| 压缩签名（只给类型） | 6,288 | **5/15** |
+| 压缩签名 + 枚举值 | 6,347 | **15/15** |
+
+补枚举只多 **59 字符**，就把 10 次失败全救回来。超过 6 个值或超过 60 字符时缩写成前三个加省略号（`[zh-CN|en-US|ja-JP…]`）。
+
+> 这也解释了「8000 字符预算要不要放宽」：不放宽。放宽只会让更多工具走完整 JSON（13K vs 6.3K，成本翻倍），而真正的缺口是签名丢了枚举——补上它就用 59 字符解决了。
+
 ### 3.4 响应（SSE）
 
 HTTP 头：`Content-Type: text/event-stream;charset=UTF-8`，**`Transfer-Encoding: chunked`**（裸 socket 客户端必须自己解 chunk 帧，见 `upstream.py:_ChunkedDecoder`）。

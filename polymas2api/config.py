@@ -290,7 +290,7 @@ def load_config(path: str) -> Config:
         
     "persona_scrub_names",
     "tool_bridge", "expose_upstream_tools", "session_isolation",
-    "tool_name_style", "tool_retry", "tool_stream_buffer_chars",
+    "tool_name_style", "tool_schema_depth", "tool_retry", "tool_stream_buffer_chars",
         "tool_stream_hold_seconds",
         "renew_interval_minutes",
     }
