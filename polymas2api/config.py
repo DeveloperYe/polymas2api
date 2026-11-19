@@ -153,8 +153,10 @@ class Config:
     #: rename them.
     #: How many levels of nested tool parameters to show the model.
     #: Measured 2026-11-17: depth 2 costs +7% over flat and is complete for
-    #: DSH's 112 tools; depth 0 hid every inner field.
-    tool_schema_depth: int = 2
+    #: DSH's 112 tools; depth 0 hid every inner field. Raised to 3 on
+    #: 2026-11-19: a tool nesting four deep lost its leaf fields at 2 (1/10
+    #: filled correctly) and kept them at 3 (10/10), for +28 characters.
+    tool_schema_depth: int = 3
     #: Write the caller's images to a local file and tell the model the path
     #: instead of dropping them. The platform cannot carry an image, and the
     #: agent's own tools run on this machine.

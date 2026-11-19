@@ -184,6 +184,23 @@ com.polymas.agent.assistant.controller.AssistantController#chatStream(
 
 `parse_tool_calls` 返回的是列表，响应层也是逐个下发；但提示词里写着「只给出最需要先执行的那一个」。改成「互不依赖时可以连续写多行、有依赖时只写第一个」之后，实测两个独立操作 3/3 返回 2 个 `tool_calls`，而依赖场景仍正确只发 1 个。
 
+**4. 工具块超预算后的压缩：深度决定「填得对不对」，不决定「选得对不对」**
+
+工具段超过 `TOOL_BLOCK_BUDGET`（8000 字符）时，每个工具的参数从完整 JSON Schema 换成 `name:type` 签名，展开到 `tool_schema_depth` 层。同一套 83 个工具、同一批要求的实测（2026-11-19，每格 n=5×5 题）：
+
+| 渲染 | 块大小 | 选对工具 | 嵌套参数全对 |
+|---|---:|---:|---:|
+| 完整 JSON | 13,676 | 25/25 | **25/25** |
+| 深度 3（现默认） | 6,934 | 25/25 | **25/25** |
+| 深度 2（原默认） | 6,906 | 24/25 | **15/25** |
+| 深度 1 | 6,826 | 25/25 | **5/25** |
+
+三个结论：
+
+- **工具选择不受影响**（24~25/25），损失只落在参数上；
+- 深度 2 已经能显示**三层**字段名（`filter:object{range:object{from to field}}`），所以对「嵌套 ≤3 层」的工具是完整的——DSH 的 112 个工具就属于这一类；
+- **四层嵌套会丢叶子字段**。`plan.strategy.rolling.batch` 这种签名，深度 2 下模型只填对 **1/10**，深度 3 下 **10/10**，而深度 3 只多 **28 字符**（+0.4%）。所以默认值已从 2 提到 3。
+
 ### 3.4 响应（SSE）
 
 HTTP 头：`Content-Type: text/event-stream;charset=UTF-8`，**`Transfer-Encoding: chunked`**（裸 socket 客户端必须自己解 chunk 帧，见 `upstream.py:_ChunkedDecoder`）。

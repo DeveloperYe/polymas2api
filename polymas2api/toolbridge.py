@@ -652,7 +652,14 @@ def _one_line(text: str, limit: int = 100) -> str:
 #: reason than size: a tool like ``ask_user_question`` rendered as
 #: ``questions:array<object>`` hides ``id``/``question`` entirely, leaving the
 #: model to guess the inner shape.
-SCHEMA_DEPTH = 2
+#: Two levels of *expansion* already name three levels of fields, which is why
+#: depth 2 measured complete for DSH's 112 tools. It is not complete for a tool
+#: that nests four deep: measured 2026-11-19 on a `plan.strategy.rolling.batch`
+#: signature, depth 2 filled the leaf fields 1/10 times, depth 3 filled them
+#: 10/10 — and depth 3 costs 28 characters on an 83-tool block (+0.4%), nothing
+#: at all on the DSH set. Depth 1 loses the third level outright (5/25 full
+#: credit against 15/25 at depth 2), so the cheap insurance is worth taking.
+SCHEMA_DEPTH = 3
 
 
 def _compact_parameters(schema: Any, depth: int = SCHEMA_DEPTH,

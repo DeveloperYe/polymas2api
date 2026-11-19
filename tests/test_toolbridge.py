@@ -584,12 +584,19 @@ def test_depth_two_reaches_one_level_deeper_than_depth_one():
     assert "c:string" in _compact_parameters(three, 2)
 
 
-def test_the_default_depth_is_two():
-    """Measured 2026-11-17: depth 2 is complete for DSH's 112 tools at +7%
-    over flat; nothing in that set nests deeper."""
-    from polymas2api.toolbridge import SCHEMA_DEPTH
+def test_the_default_depth_reaches_a_four_deep_leaf():
+    """Depth 2 is complete for DSH's 112 tools (measured 2026-11-17, +7% over
+    flat) but not for a tool nesting four deep: its leaf fields disappeared and
+    the model filled them 1/10 times. Depth 3 recovered 10/10 for 28 characters
+    on an 83-tool block, so the default moved (2026-11-19).
+    """
+    from polymas2api.toolbridge import SCHEMA_DEPTH, _compact_parameters
 
-    assert SCHEMA_DEPTH == 2
+    assert SCHEMA_DEPTH >= 3
+    four = {"type": "object", "properties": {"a": {"type": "object", "properties": {
+        "b": {"type": "object", "properties": {
+            "c": {"type": "object", "properties": {"d": {"type": "string"}}}}}}}}}
+    assert "d:string" in _compact_parameters(four)
 
 
 def test_a_tool_with_no_parameters_says_so():
@@ -833,3 +840,31 @@ def test_the_tool_block_allows_independent_calls_in_parallel():
     text = block[0] if isinstance(block, tuple) else block
     assert "多行 CALL" in text
     assert "只给出最需要先执行的那一个" not in text
+
+
+def test_a_four_level_tool_names_its_leaf_fields():
+    """Depth 2 names three levels; a four-deep leaf vanished and the model
+    filled it 1/10 times (measured 2026-11-19). Depth 3 costs 28 characters.
+    """
+    from polymas2api.toolbridge import build_tool_prompt
+
+    # plan > strategy > rolling > {batch, pause}, built outward from the leaf so
+    # the nesting is readable rather than a wall of closing braces.
+    leaf = {"batch": {"type": "integer"}, "pause": {"type": "string"}}
+    node = leaf
+    for name in ("rolling", "strategy", "plan"):
+        node = {name: {"type": "object", "properties": node}}
+    deep = {"type": "function",
+            "function": {"name": "deploy_job", "description": "部署任务",
+                         "parameters": {"type": "object", "required": ["job"],
+                                        "properties": {"job": {"type": "string"}, **node}}}}
+    pads = [{"type": "function",
+             "function": {"name": f"util_{i:02d}", "description": "占位工具，把块撑过压缩阈值",
+                          "parameters": {"type": "object", "required": ["arg"],
+                                         "properties": {"arg": {"type": "string"},
+                                                        "mode": {"type": "string"}}}}}
+            for i in range(80)]
+    block = build_tool_prompt([deep] + pads)
+    text = block[0] if isinstance(block, tuple) else block
+    assert "rolling:object{batch:integer pause:string}" in text, \
+        "the leaf fields must survive the compacted render"
