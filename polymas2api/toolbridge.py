@@ -55,7 +55,9 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+import threading
+import uuid
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Set
 
 __all__ = [
     "CALL_MARKER",
@@ -233,6 +235,18 @@ class ToolCall:
     raw_arguments: Dict[str, Any] = field(default_factory=dict)
 
     def to_openai(self, index: int = 0) -> Dict[str, Any]:
+        """OpenAI shape, with an id the client can key on.
+
+        The id must be unique across the whole conversation. Leaving it empty
+        let the client invent one per turn — ``call_0001``, ``call_0002``, then
+        ``call_0001`` again next turn — and DSH keys conversation nodes by that
+        id, so a later turn's call collided with an earlier node and the event
+        feed threw "received an update before its start". The whole conversation
+        then stopped rendering: the user saw their new message vanish from both
+        the conversation and the trajectory (reported 2026-11-19).
+        """
+        if not self.id:
+            self.id = f"call_{uuid.uuid4().hex[:22]}"
         return {
             "index": index,
             "id": self.id,
@@ -542,10 +556,59 @@ def _tidy(text: str) -> str:
 
 
 def _assign_ids(calls: Sequence[ToolCall]) -> List[ToolCall]:
-    for index, call in enumerate(calls, start=1):
+    """Give every call an id that is unique for the life of the conversation.
+
+    This used to be ``call_0001``, ``call_0002`` … restarting with every
+    response. OpenAI only requires an id, but clients treat it as a key: DSH
+    builds one conversation node per ``callId``, so the second turn's
+    ``call_0001`` arrived as an update to a node whose start belonged to the
+    first turn, the event feed threw "received an update before its start", and
+    the whole conversation stopped rendering — the user's new message vanished
+    from both the conversation and the trajectory (reported 2026-11-19).
+
+    Random rather than a counter: the gateway is stateless across restarts, so
+    a counter would collide again the moment the process came back.
+    """
+    for call in calls:
         if not call.id:
-            call.id = f"call_{index:04d}"
+            call.id = new_call_id()
     return list(calls)
+
+
+#: Ids already handed out by this process, so a repeated random draw can never
+#: reach a client. 20 hex characters is 80 bits of randomness — a million calls
+#: in one conversation collide with probability 4e-13 — but "practically never"
+#: is not "never", and the failure mode is a client that stops rendering.
+_ISSUED_IDS: Set[str] = set()
+_ISSUED_LOCK = threading.Lock()
+_ISSUED_CAP = 200_000
+
+
+def new_call_id() -> str:
+    """A tool call id that is unique, at least within this process.
+
+    Randomness alone is the guarantee across restarts: the gateway keeps no
+    state, so a counter would restart at one and collide with the previous
+    run's ids — the exact bug this replaced. The set turns "the same 80-bit
+    draw happened twice" from unlikely into impossible, at the cost of a few
+    bytes per call.
+    """
+    global _ISSUED_IDS
+    with _ISSUED_LOCK:
+        if len(_ISSUED_IDS) > _ISSUED_CAP:
+            # Bounded memory; a collision against a forgotten id is back to the
+            # 80-bit probability, which is fine.
+            _ISSUED_IDS = set()
+        # Bump rather than redraw: a redraw loop would never end if the random
+        # source ever repeated itself, which is exactly the case worth surviving.
+        base = f"call_{uuid.uuid4().hex[:20]}"
+        candidate = base
+        bump = 0
+        while candidate in _ISSUED_IDS:
+            bump += 1
+            candidate = f"{base}x{bump}"
+        _ISSUED_IDS.add(candidate)
+        return candidate
 
 
 class ToolCallParser:

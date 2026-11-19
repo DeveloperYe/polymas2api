@@ -217,6 +217,28 @@ com.polymas.agent.assistant.controller.AssistantController#chatStream(
 
 > 这也解释了「8000 字符预算要不要放宽」：不放宽。放宽只会让更多工具走完整 JSON（13K vs 6.3K，成本翻倍），而真正的缺口是签名丢了枚举——补上它就用 59 字符解决了。
 
+### 3.3.2 `tool_call.id` 必须唯一，不能按轮重排
+
+`CALL` 行里没有 id，id 是网关自己造的。造错了代价很大：**客户端会拿它当对话节点的键**。
+
+2026-11-19 的事故：id 发的是空字符串，客户端只能自己编号 `call_0001`、`call_0002`，**而且每轮从头开始**。第二轮的 `call_0001` 撞上第一轮的同名节点，客户端事件流抛 `received an update before its start`，**整条对话停止渲染**——用户看到的是「我发的消息不见了」，实际上消息在日志里完好。
+
+现在的做法（`toolbridge.py` 的 `new_call_id()`）：
+
+```python
+base = f"call_{uuid.uuid4().hex[:20]}"   # 80 位随机，跨进程重启也不撞
+# 进程内已发出的 id 记在集合里，撞了就加后缀，不重抽
+while candidate in _ISSUED_IDS:
+    bump += 1
+    candidate = f"{base}x{bump}"
+```
+
+- **不用计数器**：网关无状态，计数器重启后从 1 开始，必然与上一轮撞车，等于退回原 bug；
+- **撞了加后缀而不是重抽**：随机源如果重复自身，重抽会死循环；
+- 80 位随机的撞车概率：10 万次调用 4.1e-15，100 万次 4.1e-13。
+
+已经写坏的历史会话，日志里的 id 需要重编号（`tool/call`、`tool/result`、`job/*`、`assistant/message` 四处同步改），并清掉投影缓存；**改之前必须停止会话**。
+
 ### 3.4 响应（SSE）
 
 HTTP 头：`Content-Type: text/event-stream;charset=UTF-8`，**`Transfer-Encoding: chunked`**（裸 socket 客户端必须自己解 chunk 帧，见 `upstream.py:_ChunkedDecoder`）。

@@ -939,3 +939,63 @@ def test_an_open_field_gets_no_enum_hint():
 
     assert _compact_parameters({"type": "object",
                                 "properties": {"q": {"type": "string"}}}) == "q:string"
+
+
+# -- tool call ids must not repeat across turns (2026-11-19) ----------------
+
+
+def test_tool_call_ids_are_unique_across_parses():
+    """A repeating id breaks the client's conversation tree.
+
+    Ids used to be ``call_0001``, ``call_0002`` … starting over with every
+    response. DSH keys one conversation node per callId, so a later turn's
+    ``call_0001`` arrived as an update to a node whose start belonged to an
+    earlier turn; the event feed threw "received an update before its start" and
+    the conversation stopped rendering — the user's new message disappeared from
+    both the conversation and the trajectory (2026-11-19).
+    """
+    from polymas2api.toolbridge import parse_tool_calls
+
+    first = parse_tool_calls('CALL pwsh {"command": "ls"}')[1][0].id
+    second = parse_tool_calls('CALL pwsh {"command": "ls"}')[1][0].id
+
+    assert first and second
+    assert first != second
+
+
+def test_parallel_calls_in_one_response_get_distinct_ids():
+    from polymas2api.toolbridge import parse_tool_calls
+
+    calls = parse_tool_calls('CALL pwsh {"command": "ls"}\nCALL pwsh {"command": "date"}')[1]
+
+    assert len(calls) == 2
+    assert calls[0].id != calls[1].id
+
+
+def test_a_repeated_random_draw_still_yields_a_distinct_id(monkeypatch):
+    """Uniqueness must not rest on the random source behaving.
+
+    Two ids reaching a client is what breaks its conversation tree, so a
+    collision is resolved by bumping a suffix rather than by redrawing — a
+    redraw loop would never end if the source ever repeated itself.
+    """
+    import polymas2api.toolbridge as toolbridge
+
+    class Frozen:
+        hex = "0" * 32
+
+    monkeypatch.setattr(toolbridge.uuid, "uuid4", lambda: Frozen())
+    issued = [toolbridge.new_call_id() for _ in range(4)]
+
+    assert len(set(issued)) == 4
+    assert issued[0] == "call_" + "0" * 20
+    assert issued[1].endswith("x1")
+
+
+def test_parsing_many_responses_never_repeats_an_id():
+    from polymas2api.toolbridge import parse_tool_calls
+
+    seen = {parse_tool_calls('CALL pwsh {"command": "ls"}')[1][0].id
+            for _ in range(2000)}
+
+    assert len(seen) == 2000
