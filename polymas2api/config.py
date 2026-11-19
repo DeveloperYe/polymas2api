@@ -174,6 +174,16 @@ class Config:
     #: Below the limit the answer is held to the end, so a missing CALL line
     #: can still be corrected; above it the client gets tokens as usual.
     tool_stream_buffer_chars: int = 240
+
+    #: How long a held answer may stay invisible before it is released anyway.
+    #:
+    #: The hold exists so a "claimed an action, never called one" answer can be
+    #: retried; keeping it costs the client every token until the generation
+    #: ends. Measured 2026-11-19: a 57-second answer that had nothing to stream
+    #: showed the user a blank panel, and 72% of that day's answers were short
+    #: enough to be held. Past this deadline the answer streams and the retry
+    #: is given up - a slow answer is better seen than retried unseen.
+    tool_stream_hold_seconds: float = 8.0
     #: Report the agent's *own* tool calls (``TOOL_REQUEST`` / ``TOOL_RESPONSE``)
     #: in a ``polymas.upstream_tools`` field.
     #:
@@ -279,6 +289,7 @@ def load_config(path: str) -> Config:
     "persona_scrub_names",
     "tool_bridge", "expose_upstream_tools", "session_isolation",
     "tool_name_style", "tool_retry", "tool_stream_buffer_chars",
+        "tool_stream_hold_seconds",
         "renew_interval_minutes",
     }
     kwargs = {key: raw[key] for key in known if key in raw}

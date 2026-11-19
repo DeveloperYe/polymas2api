@@ -2456,3 +2456,45 @@ def test_a_prose_answer_below_the_limit_is_still_held():
     # passes never satisfy `_retry_wins`; what matters here is that the hold
     # still bought the retry at all.
     assert adapter.calls >= 2, "a claim without a call is still corrected"
+
+
+def test_a_held_answer_is_released_once_the_deadline_passes():
+    """A slow answer must not stay invisible: past the deadline it streams.
+
+    The hold can only be released by a condition inside the read loop, and the
+    platform keeps trickling frames even when it is almost stalled (320 tokens
+    over 247 s on 2026-11-19), so the deadline is checked per chunk. Losing the
+    retry for that turn is the price of showing the answer at all.
+    """
+    import time
+
+    gateway = _gw()
+    gateway.cfg.tool_stream_hold_seconds = 0.05
+    observed = {}
+
+    class _Trickle:
+        def stream(self, client, prompt, **kwargs):
+            yield _chunk({"content": "一"})
+            time.sleep(0.08)                    # past the deadline
+            yield _chunk({"content": "二"})
+            observed["advanced"] = True          # reached only if never released
+            yield _chunk({"content": "三"})
+            yield _chunk({}, "stop")
+
+    gateway.adapter = lambda client, names=None: _Trickle()
+    stream = gateway._stream_with_journal(
+        _Account(), None, "prompt", "m", "s", TOOLS_ONE, ["pwsh"])
+    first = next(stream)
+    assert "advanced" not in observed, "the answer should stream after the deadline"
+    assert first["choices"][0]["delta"].get("content") == "一"
+    list(stream)
+
+
+def test_a_fast_short_answer_is_still_held_for_the_retry():
+    """The deadline must not disable the safety net for ordinary answers."""
+    gateway = _gw()
+    adapter = _Scripted(
+        [_chunk({"content": "我已经帮你创建好了。"}), _chunk({}, "stop")],
+    )
+    _drain(gateway, adapter)
+    assert adapter.calls >= 2, "a claim without a call is still corrected"

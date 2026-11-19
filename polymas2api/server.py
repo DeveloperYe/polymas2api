@@ -745,6 +745,8 @@ class Gateway:
         hold_limit = (int(getattr(self.cfg, "tool_stream_buffer_chars", 240))
                       if tools and not continuation else 0)
         held = hold_limit > 0
+        hold_deadline = float(getattr(self.cfg, "tool_stream_hold_seconds", 8.0) or 0)
+        held_since = 0.0
 
         def _release() -> Iterator[Dict[str, Any]]:
             del buffered[:]
@@ -781,14 +783,21 @@ class Gateway:
                         yield chunk
                         continue
                     buffered.append(chunk)
-                    # Either condition settles the question this hold exists to
-                    # answer. Prose past the limit cannot be a claim-without-call
-                    # shape, and a parsed call means the retry can no longer
-                    # fire at all. Holding a call back only delays the client —
-                    # with the persona emitting the call on its first line, a
-                    # short answer would otherwise stay invisible for the whole
-                    # generation (reported 2026-11-19 as "nothing was output").
-                    if delta.get("tool_calls") or (hold_limit and content > hold_limit):
+                    if not held_since:
+                        held_since = time.monotonic()
+                    # A slow answer is better seen than retried unseen. The
+                    # platform can dribble a short answer out for minutes
+                    # (measured 2026-11-19: 320 tokens over 247 s), and a held
+                    # answer shows the client nothing at all for that whole
+                    # stretch. Past the deadline the answer streams and the
+                    # corrective retry is given up for this turn.
+                    stale = bool(hold_deadline) and \
+                        (time.monotonic() - held_since) >= hold_deadline
+                    if delta.get("tool_calls") or stale \
+                            or (hold_limit and content > hold_limit):
+                        if stale:
+                            self.log("held answer released after %gs; "
+                                     "no retry for this turn" % hold_deadline)
                         for pending in buffered:
                             yield pending
                         _release()
@@ -1195,6 +1204,7 @@ class Gateway:
                 "tool_schema_depth": cfg.tool_schema_depth,
                 "tool_retry": cfg.tool_retry,
                 "tool_stream_buffer_chars": cfg.tool_stream_buffer_chars,
+                "tool_stream_hold_seconds": cfg.tool_stream_hold_seconds,
                 "chat_mode": cfg.chat_mode,
                 "act_mode": cfg.act_mode,
                 "terminal": cfg.terminal,
@@ -1479,7 +1489,7 @@ class Gateway:
             # with an empty "applied"). Measured 2026-11-17: the model picker
             # looked dead for exactly this reason.
             "model", "local_image_attachments", "tool_retry",
-            "tool_stream_buffer_chars",
+            "tool_stream_buffer_chars", "tool_stream_hold_seconds",
         }
         applied = {key: value for key, value in changes.items() if key in allowed}
         if "fingerprint" in applied and applied["fingerprint"] not in PROFILES:
@@ -1495,6 +1505,7 @@ class Gateway:
             "think_time_cap_ms": (0, 600000),
             "journal_size": (1, 100000),
             "tool_stream_buffer_chars": (0, 100000),
+            "tool_stream_hold_seconds": (0.0, 600.0),
         }
         for key, (low, high) in bounds.items():
             if key not in applied:
