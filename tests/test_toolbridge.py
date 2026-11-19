@@ -894,18 +894,44 @@ def test_a_compacted_signature_names_its_enum_members():
 
 
 def test_a_long_enum_is_abbreviated_rather_than_pasted_whole():
-    """Twelve locales would cost more than the field is worth."""
+    """Abbreviation is about width, not count — twelve locales blow the budget."""
     from polymas2api.toolbridge import _compact_parameters
 
     schema = {"type": "object", "properties": {
         "lang": {"type": "string",
-                 "enum": ["zh-CN", "en-US", "ja-JP", "ko-KR", "fr-FR",
-                          "de-DE", "es-ES", "ru-RU"]}}}
+                 "enum": ["zh-CN", "en-US", "ja-JP", "ko-KR", "fr-FR", "de-DE",
+                          "es-ES", "ru-RU", "pt-BR", "it-IT", "nl-NL", "sv-SE"]}}}
     signature = _compact_parameters(schema)
 
-    assert signature.startswith("lang:string[zh-CN|en-US|ja-JP")
     assert signature.endswith("…]")
-    assert "ru-RU" not in signature
+    assert "sv-SE" not in signature
+
+
+def test_a_short_enum_is_named_in_full_even_with_many_members():
+    """Seven digits cost thirteen characters; hiding four of them was pure loss.
+
+    The first cut counted members and cut a 13-character set down to
+    `[0|1|2…]` (reported 2026-11-19).
+    """
+    from polymas2api.toolbridge import _compact_parameters
+
+    schema = {"type": "object",
+              "properties": {"level": {"type": "integer",
+                                       "enum": [0, 1, 2, 3, 4, 5, 6]}}}
+    assert _compact_parameters(schema) == "level:integer[0|1|2|3|4|5|6]"
+
+
+def test_enum_members_are_rendered_as_json_literals():
+    """``enum: [true, false]`` must not read ``[True|False]``.
+
+    A model copying the Python spelling sends the *string* "True" to a boolean
+    parameter — a type error for a field the signature just declared boolean.
+    """
+    from polymas2api.toolbridge import _enum_hint
+
+    assert _enum_hint({"enum": [True, False]}) == "[true|false]"
+    assert _enum_hint({"enum": ["auto", None]}) == "[auto|null]"
+    assert _enum_hint({"enum": [1, 0]}) == "[1|0]"
 
 
 def test_an_open_field_gets_no_enum_hint():

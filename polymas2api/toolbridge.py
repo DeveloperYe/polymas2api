@@ -707,11 +707,32 @@ def _compact_parameters(schema: Any, depth: int = SCHEMA_DEPTH,
     return " ".join(parts)
 
 
-#: How many enum values a signature may name before it gives up and abbreviates.
-#: A signature is a reminder, not a reference: the model needs to see that a
-#: closed set exists and what its members look like.
-_ENUM_SHOWN = 6
+#: How wide an enum hint may get before it abbreviates. **Width, not count**:
+#: six one-character values cost twelve characters and are worth naming in full
+#: (`[0|1|2|3|4|5|6]`), while three long values can already be noise. Counting
+#: values was the first cut and it truncated a 13-character set to `[0|1|2…]`
+#: (reported 2026-11-19 from a sibling project).
 _ENUM_WIDTH = 60
+
+#: A hard cap, so a list of many short values cannot eat the block.
+_ENUM_SHOWN = 12
+
+
+def _scalar_text(value: Any) -> str:
+    """Render an enum member the way JSON writes it.
+
+    ``enum: [true, false]`` on a boolean parameter has to read ``[true|false]``.
+    ``str(True)`` gives ``True``, and a model copying that produces the *string*
+    ``"True"`` — a type error at the caller, for a field whose type the signature
+    had just declared as boolean.
+    """
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        return "null"
+    return str(value)
 
 
 def _enum_hint(spec: Any) -> str:
@@ -728,11 +749,21 @@ def _enum_hint(spec: Any) -> str:
     values = spec.get("enum")
     if not isinstance(values, list) or not values:
         return ""
-    shown = [str(value) for value in values[:_ENUM_SHOWN]]
-    text = "|".join(shown)
-    if len(values) > _ENUM_SHOWN or len(text) > _ENUM_WIDTH:
-        text = "|".join(shown[:3]) + "…"
-    return f"[{text}]"
+    shown: List[str] = []
+    width = 0
+    for value in values:
+        text = _scalar_text(value)
+        if not shown:
+            if len(text) > _ENUM_WIDTH:
+                return f"[{text[:_ENUM_WIDTH - 1]}…]"
+            shown.append(text)
+            width = len(text)
+            continue
+        if len(shown) >= _ENUM_SHOWN or width + 1 + len(text) > _ENUM_WIDTH:
+            return "[" + "|".join(shown) + "|…]"
+        shown.append(text)
+        width += 1 + len(text)
+    return "[" + "|".join(shown) + "]"
 
 def ascii_alias(name: str, index: int) -> str:
     """A deterministic ASCII stand-in for a non-ASCII tool name.
