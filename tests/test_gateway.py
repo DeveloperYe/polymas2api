@@ -2561,3 +2561,35 @@ def test_every_writable_numeric_setting_is_loaded():
 
     assert loaded.tool_schema_depth == 1
     assert inspect.isclass(Config)
+
+
+# -- tool call frames must not be bursted into one millisecond (2026-11-20) --
+
+
+def test_tool_call_frames_are_spaced_out():
+    """A client that drops bursted SSE frames loses a call, not a call frame.
+
+    Measured 2026-11-20: the tool_calls frames and the finish frame all left in
+    the same millisecond. A sibling gateway saw the client drop exactly that
+    burst — arriving as an empty tool-call id (which makes the session
+    unwritable) or as half an argument object.
+    """
+    import time
+
+    from polymas2api.adapter import OpenAIAdapter
+
+    class Config(_Config):
+        tool_frame_gap_ms = 40.0
+
+    client = _FakeClient([
+        ("ANSWER", {"text": 'CALL pwsh {"command": "Get-Date"}\nCALL pwsh {"command": "hostname"}'}),
+        ("ALL_FINISHED", {"text": None}),
+    ])
+    started = time.monotonic()
+    chunks = list(OpenAIAdapter(Config()).stream(client, "hi", tools=_pwsh_tool()))
+    elapsed = time.monotonic() - started
+
+    tool_chunks = [c for c in chunks if c["choices"][0]["delta"].get("tool_calls")]
+    assert len(tool_chunks) == 2
+    # Two frames plus the finish frame means two full gaps at least.
+    assert elapsed >= 0.08

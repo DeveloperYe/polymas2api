@@ -175,6 +175,12 @@ class Config:
     #:
     #: Below the limit the answer is held to the end, so a missing CALL line
     #: can still be corrected; above it the client gets tokens as usual.
+    #: Gap between the SSE frames that carry a tool call, in milliseconds.
+    #: Measured 2026-11-20: the tool_calls frames and the finish frame went out
+    #: in the *same* millisecond, which is the shape a sibling gateway found the
+    #: client drops — it lost a frame and ended up with an empty id or half a
+    #: JSON argument. Eight milliseconds is what that project settled on.
+    tool_frame_gap_ms: float = 8.0
     tool_stream_buffer_chars: int = 240
 
     #: How long a held answer may stay invisible before it is released anyway.
@@ -290,7 +296,8 @@ def load_config(path: str) -> Config:
         
     "persona_scrub_names",
     "tool_bridge", "expose_upstream_tools", "session_isolation",
-    "tool_name_style", "tool_schema_depth", "tool_retry", "tool_stream_buffer_chars",
+    "tool_frame_gap_ms", "tool_name_style", "tool_schema_depth", "tool_retry",
+        "tool_stream_buffer_chars",
         "tool_stream_hold_seconds",
         "renew_interval_minutes",
     }

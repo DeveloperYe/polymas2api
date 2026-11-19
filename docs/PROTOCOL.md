@@ -241,6 +241,39 @@ while candidate in _ISSUED_IDS:
 
 已经写坏的历史会话，日志里的 id 需要重编号（`tool/call`、`tool/result`、`job/*`、`assistant/message` 四处同步改），并清掉投影缓存；**改之前必须停止会话**。
 
+### 3.3.3 流式帧的顺序、整包与间隔
+
+`CALL` 是文本，要变成 OpenAI 的 `tool_calls` 就得由网关自己组帧。组帧有三条纪律，全部来自实测事故（另一个网关 trae2api 用同一套 CALL 协议，2026-11-20 为此排查了一整天）：
+
+**① 顺序：正文先，tool_calls 后，finish 最后**
+
+反过来发（tool_calls 在前）会让客户端只记下正文、把工具调用整个丢掉——模型于是声称「文件写好了」，磁盘上什么都没有。
+
+**② 整包，不分片**
+
+| 方案 | 丢一帧的后果 | 危险度 |
+|---|---|---|
+| 单帧整包 | 完全没有调用 → 客户端报「没调工具」→ 可安全重试 | 低 |
+| 按片累积 | 缺一段 → 半截 JSON → `Unexpected token …` → 会话可能被写坏 | 高 |
+
+OpenAI 规范允许一个 delta 里放完整 `arguments`。**只有逐 token 生成的上游才必须分片**——我们是解析方，不是生成方，没必要模仿。
+
+**③ 帧之间留间隔**
+
+实测（2026-11-20）：正文之后，两个 `tool_calls` 帧和 `finish` 帧**在同一毫秒内连发**（跨度 0ms）。同源事故记录显示客户端会丢掉这种突发批次——丢掉的可能是带 `id`/`name` 的那一帧，于是 `callId` 为空、v4 校验 `toolCallId matching its tool source` 失败，整轮无法写入。
+
+现在按 `tool_frame_gap_ms`（默认 8 ms，面板可调 0–200）在每帧之间停一下：
+
+```
+3757ms  tool_calls x1  +0ms
+3766ms  tool_calls x1  +9ms
+3775ms  finish:tool_calls  +9ms      ← 跨度 18ms，不再是 0ms
+```
+
+代价是每个工具调用多 8 ms。
+
+**验证方式**：用客户端自己的库（DSH 的 `pi-ai`）直连网关，而不是只看自己的日志。实测 3,936 / 6,185 字符的 SVG 参数完整收到、以 `</svg>` 结尾；两个并行调用各自带不同 `id` 与正确 `name`。
+
 ### 3.4 响应（SSE）
 
 HTTP 头：`Content-Type: text/event-stream;charset=UTF-8`，**`Transfer-Encoding: chunked`**（裸 socket 客户端必须自己解 chunk 帧，见 `upstream.py:_ChunkedDecoder`）。

@@ -145,8 +145,16 @@ class OpenAIAdapter:
         usage = usage_for(prompt, "".join(sent_content),
                           "".join(sent_reasoning))
         if calls:
+            # Space the frames out. One millisecond is enough for a client that
+            # drops bursted SSE frames to lose one of them, and a lost tool-call
+            # frame is either an empty id (session unwritable) or half an
+            # argument object — see docs/PROTOCOL.md 3.3.2 and the sibling
+            # project's findings. Costs 8 ms per call.
+            gap = max(0.0, float(getattr(self.cfg, "tool_frame_gap_ms", 8.0))) / 1000.0
             for index, call in enumerate(calls):
                 yield self._chunk(model, delta={"tool_calls": [call.to_openai(index)]})
+                if gap:
+                    time.sleep(gap)
             yield self._chunk(model, delta={}, finish_reason="tool_calls", usage=usage)
             return
         yield self._chunk(model, delta={},

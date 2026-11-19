@@ -1527,6 +1527,7 @@ class Gateway:
             # 深度决定嵌套参数能不能被填对（见 docs/PROTOCOL.md 3.3.1）：
             # 放到 999 会退回 113K 字符的完整展开，负数会退化成平铺。
             "tool_schema_depth": (0, 6),
+            "tool_frame_gap_ms": (0.0, 200.0),
         }
         for key, (low, high) in bounds.items():
             if key not in applied:
