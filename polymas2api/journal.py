@@ -29,7 +29,7 @@ class JournalEntry:
                  reasoning_chars: int = 0, content_chars: int = 0,
                  archived: bool = False, tools: str = "",
                  prompt_tokens: int = 0, completion_tokens: int = 0,
-                 aborted: bool = False):
+                 aborted: bool = False, ttft_ms: int = 0, max_gap_ms: int = 0):
         self.account = account
         self.model = model
         self.stream = stream
@@ -50,6 +50,12 @@ class JournalEntry:
         #: The caller hung up mid-answer (a "stop" click). Not an error, but
         #: not a clean success either — counted separately.
         self.aborted = aborted
+        #: Time to the first upstream frame, and the longest silence between
+        #: frames. Duration alone cannot tell "waited to start" from "crawled
+        #: while streaming", and telling them apart is the whole question when
+        #: a turn takes minutes (2026-11-19: 320 tokens over 247 s).
+        self.ttft_ms = ttft_ms
+        self.max_gap_ms = max_gap_ms
         self.archived = archived
         #: Names of the *agent's own* tools this call used, comma separated.
         #:
@@ -71,6 +77,8 @@ class JournalEntry:
             "aborted": self.aborted,
             "status": self.status,
             "duration_ms": self.duration_ms,
+            "ttft_ms": self.ttft_ms,
+            "max_gap_ms": self.max_gap_ms,
             "prompt_chars": self.prompt_chars,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,

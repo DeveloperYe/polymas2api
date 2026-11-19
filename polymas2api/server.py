@@ -752,10 +752,24 @@ class Gateway:
             del buffered[:]
             return iter(())
 
+        #: Time to the first frame and the longest silence between frames.
+        #: A slow turn is either "waited to start" or "crawled while
+        #: streaming", and only these two numbers tell them apart afterwards
+        #: (2026-11-19: a 247 s turn that produced 320 tokens).
+        loop_started = time.monotonic()
+        first_at = 0.0
+        prev_at = 0.0
+        max_gap = 0.0
         try:
             for chunk in self.adapter(client, emit_names).stream(
                     client, prompt, model=model, session_id=session_id, tools=tools,
                     overrides=overrides):
+                now = time.monotonic()
+                if not first_at:
+                    first_at = now - loop_started
+                else:
+                    max_gap = max(max_gap, now - prev_at)
+                prev_at = now
                 if "error" in chunk:
                     error = str(chunk["error"].get("message", ""))
                     for pending in buffered:
@@ -842,7 +856,8 @@ class Gateway:
                           "usage": usage_for(prompt, "".join(content_text),
                                              "".join(reasoning_text))},
                          started, True, used_tools,
-                         aborted=bool(client_gone is not None and client_gone.is_set()))
+                         aborted=bool(client_gone is not None and client_gone.is_set()),
+                         ttft_ms=int(first_at * 1000), max_gap_ms=int(max_gap * 1000))
 
     def _retry_stream(self, client, prompt, model, session_id, tools, emit_names,
                       effective, used_tools, buffered, overrides=None,
@@ -1007,7 +1022,8 @@ class Gateway:
         return bool(self._retry_reason(tools, result, force_tool))
 
     def _record(self, account, model, prompt, result, started, stream,
-                tools: Any = None, aborted: bool = False) -> None:
+                tools: Any = None, aborted: bool = False,
+                ttft_ms: int = 0, max_gap_ms: int = 0) -> None:
         duration = int((time.time() - started) * 1000)
         # Two shapes reach this point: the OpenAI completion object (non
         # streaming) and the plain {"reasoning": n, "content": n} tally the
@@ -1059,6 +1075,8 @@ class Gateway:
             completion_tokens=completion_tokens,
             tools=used,
             aborted=aborted,
+            ttft_ms=int(ttft_ms or 0),
+            max_gap_ms=int(max_gap_ms or 0),
         )
         self.journal.record(entry)
         if not error:

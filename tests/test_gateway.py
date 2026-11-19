@@ -2498,3 +2498,25 @@ def test_a_fast_short_answer_is_still_held_for_the_retry():
     )
     _drain(gateway, adapter)
     assert adapter.calls >= 2, "a claim without a call is still corrected"
+
+
+# -- the journal separates "waited" from "crawled" (2026-11-19) ------------
+
+
+def test_the_journal_records_first_frame_and_longest_gap():
+    """Duration alone cannot say where a slow turn went.
+
+    A turn can be slow because the model waited to start or because it crawled
+    while streaming, and the two want opposite fixes (retry earlier vs tune the
+    client). Both are now recorded; 2026-11-19 had a 247 s turn that produced
+    320 tokens and left nothing to tell them apart afterwards.
+    """
+    gateway = _gw()
+    adapter = _Scripted([_chunk({"content": "答案"}), _chunk({}, "stop")])
+    _drain(gateway, adapter)
+
+    entries = gateway.journal.recent(1) if hasattr(gateway.journal, "recent") \
+        else gateway.journal.entries[-1:]
+    entry = entries[-1].to_dict() if hasattr(entries[-1], "to_dict") else entries[-1]
+    assert "ttft_ms" in entry and "max_gap_ms" in entry
+    assert entry["ttft_ms"] >= 0 and entry["max_gap_ms"] >= 0
