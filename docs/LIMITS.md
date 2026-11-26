@@ -371,6 +371,12 @@
 >
 > 现在不加安全余量：最可能是零偏差，加余量会让「词表正确」这个主场景也白白浪费窗口；
 > 而万一偏小，失败是**响亮**的（502 而不是静默截断），能立刻发现。
+>
+> **决定（2026-11-26）**：就按这三套词表的结果当作当前可得的精确值使用，
+> `usage.estimated = false` 即表示「用目前能拿到的最准词表算出来的」。
+> 客户端侧落库形态（`dsh-token-meter` → 会话日志）：`{"inputTokens", "outputTokens",
+> "totalTokens", "cacheReadTokens"}`，其中 `inputTokens = prompt_tokens - cached_tokens`；
+> polymas 没有缓存，所以 `inputTokens` 应当等于我们上报的 `prompt_tokens`。
 
 
 上一版这节的数字（生产形态 −0.6%）**是错的**，来源是 `tools/probe_tokenizer.py` 那份纯 Python
