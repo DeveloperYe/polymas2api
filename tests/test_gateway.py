@@ -2880,3 +2880,29 @@ def test_a_normal_turn_still_streams_200():
         assert b"[DONE]" in body
     finally:
         server.close()
+
+
+def test_a_midstream_error_frame_uses_the_openai_shape():
+    """Once the stream has started the status cannot change, so the frame is all
+    a client has to go on — it should look like the non-streaming error."""
+    gateway = _streaming_gateway([
+        {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+         "choices": [{"index": 0, "delta": {"content": "起"}, "finish_reason": None}]},
+        {"error": {"message": "boom", "type": "upstream_error"}},
+    ])
+    server = _PanelServer(gateway)
+    try:
+        status, body = _post_json(server, "/v1/chat/completions", BODY_ONE_TURN,
+                                  "testkey")
+        assert status == 200
+        frames = [json.loads(line[5:]) for line in body.decode("utf-8").splitlines()
+                  if line.startswith("data: ") and "[DONE]" not in line]
+        error_frames = [f for f in frames if "error" in f]
+        assert error_frames, "the failure must reach the client in some form"
+        frame = error_frames[0]
+        assert frame["error"]["message"] == "boom"
+        # The flat keys stay for anything written against the old shape.
+        assert frame["message"] == "boom"
+        assert frame["type"] == "upstream_error"
+    finally:
+        server.close()

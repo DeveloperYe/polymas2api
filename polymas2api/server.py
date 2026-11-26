@@ -2154,7 +2154,15 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(item, BaseException):
                     raise item
                 if "error" in item:
-                    frame = f"data: {json.dumps(item['error'], ensure_ascii=False)}\n\n"
+                    # OpenAI shape, the same one the non-streaming path uses
+                    # (``_send_json({"error": ...}, 502)``). The unwrapped form
+                    # this used to write is not what a client looks for; the
+                    # flat keys stay alongside it because nothing in this repo
+                    # consumes either form and a mid-stream frame is the one
+                    # place a caller cannot get the reason from anywhere else.
+                    payload = dict(item["error"])
+                    payload["error"] = item["error"]
+                    frame = f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
                 else:
                     frame = f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
                 self.wfile.write(frame.encode("utf-8"))
