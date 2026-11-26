@@ -565,9 +565,10 @@ class Gateway:
                     "object": "model",
                     "created": int(time.time()),
                     "owned_by": "polymas",
-                    # The platform sends no context length, so this is the
-                    # declared figure from constants.MODEL_CONTEXT_LENGTHS (or
-                    # the 1M fallback). Clients that size a context window from
+                    # The catalogue carries ``contextLength`` per model
+                    # (measured 2026-11-26: 1,000,000 / 1,048,576 / 262,144 /
+                    # 131,072 depending on the model); the constants table is
+                    # only the fallback. Clients that size a context window from
                     # a model listing read this key — dsh-llm-pi-ai accepts
                     # context_length / context_window / max_input_tokens /
                     # limit.context, measured in its model discovery.
