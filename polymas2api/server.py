@@ -583,9 +583,10 @@ class Gateway:
                     # limit.context, measured in its model discovery.
                     "context_length": item.get("contextLength") or C.DEFAULT_CONTEXT_LENGTH,
                     # Declarative only: the platform ignores max_tokens
-                    # upstream, but a client sizes its own budget from
-                    # this key, so it carries the vendor's figure.
-                    "max_tokens": C.max_output_tokens(item["modelCode"]),
+                    # upstream, but a client sizes its own budget from this key.
+                    # Omitted entirely when no vendor figure is known — see
+                    # constants.max_output_entry.
+                    **C.max_output_entry(item["modelCode"]),
                     "polymas": {"alias": item.get("alias"), "default": item.get("default"),
                                 "reasoningEffort": item.get("reasoningEffort"),
                                 "multimodal": item.get("multimodal"),

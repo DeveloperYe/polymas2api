@@ -23,8 +23,7 @@ __all__ = [
     "MODEL_CONTEXT_LENGTHS",
     "DEFAULT_CONTEXT_LENGTH",
     "MODEL_MAX_OUTPUT",
-    "DEFAULT_MAX_OUTPUT",
-    "max_output_tokens",
+    "max_output_entry",
 ]
 
 #: Base URL of every business endpoint.
@@ -155,10 +154,19 @@ MODEL_MAX_OUTPUT = {
     "Doubao-Seed-2.1-turbo": 128 * 1024,
     "Doubao-Seed-1.8": 128 * 1024,
     "doubao-seed-evolving": 128 * 1024,
+    # Zhipu, per docs.bigmodel.cn/cn/guide/models/text/glm-5.3: "支持 1M 上下文
+    # 窗口，最大输出 Tokens 为 128K". The Flash variant's page says only that its
+    # text parameters "与 GLM-5.3 保持一致", so its figure is inherited rather
+    # than printed — noted here because that is a weaker source.
+    "glm-5.3": 128 * 1024,
+    "glm-5.3-flash": 128 * 1024,
 }
 
-#: Used for a model missing from the table (a new platform model, say).
-DEFAULT_MAX_OUTPUT = 128 * 1024
+#: There is deliberately no default. A model missing from the table gets no
+#: ``max_tokens`` key at all: an invented figure is worse than an absent one,
+#: because a client cannot tell 128K-from-the-vendor from 128K-from-nowhere.
+#: (This constant briefly existed and was applied to glm-5.3 by luck — the
+#: vendor does say 128K — which is exactly the problem with defaults.)
 
 
 MODEL_CONTEXT_LENGTHS = {
@@ -181,6 +189,12 @@ MODEL_CONTEXT_LENGTHS = {
 #: 1,600,000 (docs/LIMITS.md §1), so 1M is the declared working figure.
 DEFAULT_CONTEXT_LENGTH = 1000000
 
-def max_output_tokens(model: str) -> int:
-    """Declared maximum output for one model, per the vendor's own figures."""
-    return MODEL_MAX_OUTPUT.get(model or "", DEFAULT_MAX_OUTPUT)
+def max_output_entry(model: str) -> dict:
+    """The ``max_tokens`` key for one model, or nothing when the figure is unknown.
+
+    Absence is meaningful: it says "this project has no sourced number for this
+    model", which a client can handle. A made-up default cannot be told apart
+    from a real one.
+    """
+    figure = MODEL_MAX_OUTPUT.get(model or "")
+    return {} if figure is None else {"max_tokens": figure}

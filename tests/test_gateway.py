@@ -2935,16 +2935,23 @@ def test_a_midstream_error_frame_uses_the_openai_shape():
 def test_max_output_follows_the_vendors_own_figures():
     from polymas2api import constants as C
 
-    assert C.max_output_tokens("deepseek-v4.1-flash") == 384 * 1024
-    assert C.max_output_tokens("qwen3.8-max") == 128 * 1024
-    assert C.max_output_tokens("qwen3.6-plus") == 64 * 1024
-    assert C.max_output_tokens("Doubao-Seed-2.0-pro") == 128 * 1024
+    figure = C.MODEL_MAX_OUTPUT.get
+    assert figure("deepseek-v4.1-flash") == 384 * 1024
+    assert figure("qwen3.8-max") == 128 * 1024
+    assert figure("qwen3.6-plus") == 64 * 1024
+    assert figure("Doubao-Seed-2.0-pro") == 128 * 1024
+    # Zhipu's own page: 1M context, 128K output.
+    assert figure("glm-5.3") == 128 * 1024
+    # Its Flash sibling only says "text parameters match GLM-5.3".
+    assert figure("glm-5.3-flash") == 128 * 1024
     # The platform ignores deepseek-v3's 8K vendor cap - 88,932 tokens came back
     # in one turn - so this one is declared at its context length instead.
-    assert C.max_output_tokens("deepseek-v3") == 131072
-    assert C.max_output_tokens("deepseek-v3") > 8 * 1024
-    # An unknown model must not make the listing fail.
-    assert C.max_output_tokens("no-such-model") == C.DEFAULT_MAX_OUTPUT
+    assert figure("deepseek-v3") == 131072
+    assert figure("deepseek-v3") > 8 * 1024
+    # An unknown model gets no figure and no key: an invented default cannot be
+    # told apart from a sourced one.
+    assert figure("no-such-model") is None
+    assert C.max_output_entry("no-such-model") == {}
 
 
 def test_the_model_listing_carries_max_tokens(monkeypatch):
@@ -2953,7 +2960,7 @@ def test_the_model_listing_carries_max_tokens(monkeypatch):
     monkeypatch.setattr(gateway, "_acquire", lambda model="": (object(), _Catalogue()))
     listing = gateway.models(refresh=True)
     by_id = {item["id"]: item for item in listing["data"]}
-    assert by_id["m1"]["max_tokens"] == 128 * 1024          # unknown → default
+    assert "max_tokens" not in by_id["m1"]                  # unknown → omitted
     assert by_id["deepseek-v4.1-flash"]["max_tokens"] == 384 * 1024
 
 
