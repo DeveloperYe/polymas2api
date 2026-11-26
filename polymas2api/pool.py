@@ -21,7 +21,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-__all__ = ["Credential", "CredentialPool", "PoolError"]
+__all__ = ["Credential", "CredentialPool", "PoolError",
+    "credential_rejected",
+]
 
 
 class PoolError(Exception):
@@ -43,6 +45,15 @@ def _is_credential_failure(error: str) -> bool:
     """Whether the error says the credential is bad rather than the call failed."""
     text = (error or "").lower()
     return any(marker.lower() in text for marker in _CREDENTIAL_FAILURE_MARKERS)
+
+
+def credential_rejected(error: object) -> bool:
+    """Public form of :func:`_is_credential_failure`, for the gateway.
+
+    The gateway needs the same judgement to decide "renew and retry" instead of
+    "quarantine the account and never try again" (2026-11-26).
+    """
+    return _is_credential_failure(str(error))
 
 
 class Credential:

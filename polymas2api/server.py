@@ -32,7 +32,7 @@ from . import agent_persona
 from .persona import NameScrubber
 from .tokens import usage_for
 from .toolbridge import SCHEMA_DEPTH, build_tool_prompt, declared_names
-from .pool import Credential, CredentialPool, PoolError
+from .pool import Credential, CredentialPool, PoolError, credential_rejected
 from .renewal import RenewalError, TokenRenewer, fetch_token
 from .sanitize import Sanitizer
 from .upstream import PolymasClient, UpstreamError
@@ -345,6 +345,92 @@ class Gateway:
         """Renew all accounts; ``True`` when none of them failed."""
         return bool(self.renew_all().get("ok"))
 
+    def probe_credential(self) -> None:
+        """One cheap catalogue call at startup, renewing if the token is dead.
+
+        The renewal timer is armed at boot and fires every
+        ``renew_interval_minutes`` (six hours by default), so a token that
+        expired while the gateway was down used to be served for hours:
+        2026-11-26 the gateway came up at 02:54 on a dead credential, answered
+        502s and listed one fallback model, and the next renewal was due at
+        08:54. One request at startup closes that window.
+        """
+        try:
+            _account, client = self._acquire()
+        except Exception:                                        # noqa: BLE001
+            return
+        try:
+            client.models()
+        except UpstreamError as error:
+            self._renew_after_rejection(error)
+        except Exception as error:                               # noqa: BLE001
+            self.log(f"credential probe skipped: {error}")
+
+    def probe_credential_async(self) -> None:
+        """Run :meth:`probe_credential` off the startup path."""
+        threading.Thread(target=self.probe_credential, daemon=True,
+                         name="credential-probe").start()
+
+    def _renew_after_rejection(self, error: object) -> bool:
+        """Renew the credential when the platform said we are not logged in.
+
+        The platform answers an expired token with HTTP 200 and ``code: 401`` in
+        the body, so nothing raises until the payload is parsed — and the old
+        behaviour was to quarantine the account and wait for the six-hourly
+        timer. Measured 2026-11-26: the token expired while the gateway was
+        down, the gateway booted at 02:54 carrying the dead one, and served a
+        single fallback model plus ``HTTP 502`` — the next renewal was due at
+        08:54. A rejected credential is exactly the case a renewal fixes, and it
+        is cheap to try before giving up on the request.
+        """
+        if not credential_rejected(error):
+            return False
+        self.log(f"platform rejected the credential ({str(error)[:80]}); renewing")
+        try:
+            if self.renew_now():
+                self.log("credential renewed; retrying the request")
+                return True
+            self.log("renewal did not produce a usable credential")
+        except Exception as renew_error:                        # noqa: BLE001
+            self.log(f"renewal after rejection failed: {renew_error}")
+        return False
+
+    def _open_stream(self, client, prompt: str, model: str, session_id: str,
+                     tools: Any, emit_names: Any,
+                     overrides: Optional[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
+        return self.adapter(client, emit_names).stream(
+            client, prompt, model=model, session_id=session_id, tools=tools,
+            overrides=overrides)
+
+    def _stream_with_credential_retry(self, client, prompt: str, *, model: str,
+                                      session_id: str, tools: Any, emit_names: Any,
+                                      overrides: Optional[Dict[str, Any]],
+                                      ) -> Iterator[Dict[str, Any]]:
+        """The upstream stream, with one renewal-and-retry on a rejected token.
+
+        Only the *first* frame is pulled under the retry: once bytes have gone
+        out a second attempt would duplicate them. A rejected credential always
+        fails before the first frame, because the platform refuses the request
+        outright.
+        """
+        stream = self._open_stream(client, prompt, model, session_id, tools,
+                                   emit_names, overrides)
+        try:
+            first = next(stream)
+        except StopIteration:
+            return
+        except UpstreamError as exc:
+            if not self._renew_after_rejection(exc):
+                raise
+            stream = self._open_stream(client, prompt, model, session_id, tools,
+                                       emit_names, overrides)
+            try:
+                first = next(stream)
+            except StopIteration:
+                return
+        yield first
+        yield from stream
+
     def stop_renewal(self) -> None:
         self._renew_stop.set()
         if self._renew_timer is not None:
@@ -457,7 +543,13 @@ class Gateway:
     def _fetch_catalogue(self) -> Dict[str, Any]:
         try:
             account, client = self._acquire()
-            catalogue = client.models()
+            try:
+                catalogue = client.models()
+            except UpstreamError as error:
+                if not self._renew_after_rejection(error):
+                    raise
+                account, client = self._acquire()
+                catalogue = client.models()
         except (UpstreamError, PoolError) as error:
             self.log(f"model catalogue unavailable: {error}")
             model = self.cfg.model or C.DEFAULT_MODEL
@@ -761,9 +853,9 @@ class Gateway:
         prev_at = 0.0
         max_gap = 0.0
         try:
-            for chunk in self.adapter(client, emit_names).stream(
-                    client, prompt, model=model, session_id=session_id, tools=tools,
-                    overrides=overrides):
+            for chunk in self._stream_with_credential_retry(
+                    client, prompt, model=model, session_id=session_id,
+                    tools=tools, emit_names=emit_names, overrides=overrides):
                 now = time.monotonic()
                 if not first_at:
                     first_at = now - loop_started
@@ -873,10 +965,10 @@ class Gateway:
         for attempt, nudge in enumerate(nudges or self.RETRY_NUDGES, start=1):
             self.log(f"retrying buffered stream ({attempt})")
             try:
-                chunks = list(self.adapter(client, emit_names).stream(
+                chunks = list(self._stream_with_credential_retry(
                     client, prompt + nudge, model=model,
                     session_id=session_id, tools=tools,
-                    overrides=overrides))
+                    emit_names=emit_names, overrides=overrides))
             except UpstreamError as error:
                 self.log(f"stream retry {attempt} failed: {error}")
                 break
@@ -2139,6 +2231,7 @@ class BoundedHTTPServer(ThreadingHTTPServer):
 def serve(cfg, *, log: Optional[Logger] = None) -> None:
     """Run the gateway until interrupted."""
     gateway = Gateway(cfg, log)
+    gateway.probe_credential_async()
     handler = type("BoundHandler", (Handler,), {"gateway": gateway})
     max_connections = int(getattr(cfg, "max_connections", 64) or 64)
     server = BoundedHTTPServer((cfg.host, cfg.port), handler, max_connections=max_connections)

@@ -1361,6 +1361,7 @@ class _Account:
     uid = "test-account"
     last_used = 0.0
     calls = 0
+    failures = 0
 
 
 def _drain(gateway, adapter):
@@ -2593,3 +2594,120 @@ def test_tool_call_frames_are_spaced_out():
     assert len(tool_chunks) == 2
     # Two frames plus the finish frame means two full gaps at least.
     assert elapsed >= 0.08
+
+
+# -- a rejected credential must be renewed, not just quarantined (2026-11-26) --
+
+
+def test_a_rejected_credential_is_renewed_and_the_request_retried(monkeypatch):
+    """The platform answers an expired token with HTTP 200 + ``code: 401``.
+
+    Nothing raises until the payload is parsed, so the old code classified it
+    as a credential failure, quarantined the account and waited for the six-
+    hourly timer. Measured 2026-11-26: the gateway booted on a dead token and
+    served 502s plus a single fallback model for hours.
+    """
+    from polymas2api.upstream import UpstreamError
+
+    gateway = _gw()
+    seen = {"streams": 0, "renewals": 0}
+
+    class _RejectOnce:
+        def stream(self, client, prompt, *, model="", session_id="", tools=None,
+                   overrides=None):
+            seen["streams"] += 1
+            if seen["streams"] == 1:
+                raise UpstreamError("拒绝访问，未登录!")
+            yield _chunk({"content": "好了"}, "stop")
+
+    gateway.adapter = lambda client, names=None: _RejectOnce()
+
+    def fake_renew():
+        seen["renewals"] += 1
+        return True
+
+    monkeypatch.setattr(gateway, "renew_now", fake_renew)
+    chunks = list(gateway._stream_with_journal(_Account(), None, "p", "m", "s"))
+    text = "".join(c["choices"][0]["delta"].get("content") or "" for c in chunks)
+
+    assert seen["renewals"] == 1, "a rejected token must be renewed"
+    assert seen["streams"] == 2, "and the request retried exactly once"
+    assert "好了" in text
+
+
+def test_a_transient_failure_is_not_treated_as_a_rejected_credential(monkeypatch):
+    from polymas2api.upstream import UpstreamError
+
+    gateway = _gw()
+    seen = {"renewals": 0}
+
+    class _Timeout:
+        def stream(self, client, prompt, *, model="", session_id="", tools=None,
+                   overrides=None):
+            raise UpstreamError("Cannot reach the platform: timed out")
+            yield  # pragma: no cover
+
+    gateway.adapter = lambda client, names=None: _Timeout()
+
+    def fake_renew():
+        seen["renewals"] += 1
+        return True
+
+    monkeypatch.setattr(gateway, "renew_now", fake_renew)
+    chunks = list(gateway._stream_with_journal(_Account(), None, "p", "m", "s"))
+
+    assert seen["renewals"] == 0, "a network blip is not a dead credential"
+    assert any((c.get("error") or {}).get("type") == "upstream_error" for c in chunks)
+
+
+def test_the_catalogue_is_fetched_again_after_a_renewal(monkeypatch):
+    from polymas2api.upstream import UpstreamError
+
+    gateway = _gw()
+    seen = {"models": 0, "renewals": 0}
+
+    class _Catalogue:
+        def models(self):
+            seen["models"] += 1
+            if seen["models"] == 1:
+                raise UpstreamError("拒绝访问，未登录!")
+            return {"models": [{"modelCode": "m1"}, {"modelCode": "m2"}],
+                    "available": []}
+
+    monkeypatch.setattr(gateway, "_acquire", lambda model="": (object(), _Catalogue()))
+
+    def fake_renew():
+        seen["renewals"] += 1
+        return True
+
+    monkeypatch.setattr(gateway, "renew_now", fake_renew)
+    result = gateway.models(refresh=True)
+
+    assert [m["id"] for m in result["data"]] == ["m1", "m2"]
+    assert seen["renewals"] == 1
+
+
+def test_a_failed_renewal_falls_back_to_one_model_without_looping(monkeypatch):
+    from polymas2api.upstream import UpstreamError
+
+    gateway = _gw()
+    seen = {"models": 0, "renewals": 0}
+
+    class _Rejecting:
+        def models(self):
+            seen["models"] += 1
+            raise UpstreamError("拒绝访问，未登录!")
+
+    monkeypatch.setattr(gateway, "_acquire", lambda model="": (object(), _Rejecting()))
+
+    def fake_renew():
+        seen["renewals"] += 1
+        return False
+
+    monkeypatch.setattr(gateway, "renew_now", fake_renew)
+    result = gateway.models(refresh=True)
+
+    assert len(result["data"]) == 1
+    assert result["data"][0]["polymas"]["source"] == "fallback"
+    assert seen["renewals"] == 1
+    assert seen["models"] == 1, "one retry attempt, not a loop"

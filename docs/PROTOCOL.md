@@ -55,6 +55,55 @@ function Fw(){ return I3.get("jt-cas") || I3.get("ai-poly",{domain:".polymas.com
 
 **结论：任一真实 cookie 单独即可鉴权，值不可伪造。**
 
+### 2.3 凭证会过期，而拒绝信号只有一个
+
+`ai-poly` 里**没有 `exp`**（见 2.1 的 payload），所以本地无法预判过期；平台什么时候作废它，只有被拒绝时才暴露。而且拒绝的形状很隐蔽：
+
+```
+HTTP 200
+{"code":401,"msg":"拒绝访问，未登录!","data":null,"success":false}
+```
+
+**HTTP 是 200**，错误藏在 body 的 `code` 里——不看 payload 会当成一次正常响应。
+
+#### 2026-11-26：一次过期被拖成了 6 小时故障
+
+| 时间 | 事件 |
+|---|---|
+| 11-22 16:38 | 凭证可用（目录 12 个模型） |
+| 其间 | 凭证被平台作废 |
+| 11-26 02:54 | 网关启动，**带着已死的凭证**；目录拉取被拒 → 退化成单模型兜底（`source: fallback`），对话回 `HTTP 502` |
+| 02:54 起 | 续期定时器排在 **6 小时后**（08:54），期间不会尝试 |
+| 09:45 | 人工发现并手工续期，恢复 |
+
+根因两条，都在网关侧：
+
+1. **凭证拒绝只做了「隔离账号」**，没做「续期」——`pool.report_failure` 把账号冷却，然后继续用同一个死凭证；
+2. **续期只由定时器驱动**（`renew_interval_minutes` 默认 360），启动时只排下一跳，不先验证。
+
+#### 修法（2026-11-26 已上线）
+
+| 位置 | 改动 |
+|---|---|
+| `server.py:_renew_after_rejection()` | 判据命中「拒绝访问/未登录/401」→ 立即 `renew_now()`，成功则请求重试一次 |
+| `server.py:_stream_with_credential_retry()` | 流式只对**第一帧**做续期重试（第一帧之前不可能有输出，重试不会重复发） |
+| `_fetch_catalogue()` | 目录拉取同样：被拒 → 续期 → 重取一次 |
+| `server.py:probe_credential()` + `serve()` | **启动即探活**一次目录接口，被拒就续期，不必等 6 小时 |
+
+> **续期接口对过期凭证仍然有效**：`getToken`（`chatim-user/v1/query/user-sig`）只需要 `userNid` + 旧 `ai-poly`，能直接换出新凭证。所以「凭证过期」不等于「要重新登录」。
+
+#### 隔离验证（真的把凭证改坏过）
+
+起一个 8788 端口、独立 `accounts_file` 的实例，把 `ai-poly` 的签名改坏，观察启动行为：
+
+```
+[09:54:18] loaded 1 account(s) from the accounts file
+[09:54:18] platform rejected the credential (拒绝访问，未登录!); renewing
+[09:54:19] credential renewed; retrying the request
+```
+
+结果：`/v1/models` 立刻是 **12 个模型（source=NACOS）**、对话 `HTTP 200`，新凭证写回文件（`renew_count` 自增、`renew_error` 为空）。整个过程 1 秒内完成，无需人工。
+
 ---
 
 ## 3. 主链路
