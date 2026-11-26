@@ -2927,3 +2927,39 @@ def test_a_midstream_error_frame_uses_the_openai_shape():
         assert frame["type"] == "upstream_error"
     finally:
         server.close()
+
+
+# -- declared output budget per model ---------------------------------------
+
+
+def test_max_output_follows_the_vendors_own_figures():
+    from polymas2api import constants as C
+
+    assert C.max_output_tokens("deepseek-v4.1-flash") == 384 * 1024
+    assert C.max_output_tokens("qwen3.8-max") == 128 * 1024
+    assert C.max_output_tokens("qwen3.6-plus") == 64 * 1024
+    assert C.max_output_tokens("Doubao-Seed-2.0-pro") == 128 * 1024
+    # The platform ignores deepseek-v3's 8K vendor cap - 88,932 tokens came back
+    # in one turn - so this one is declared at its context length instead.
+    assert C.max_output_tokens("deepseek-v3") == 131072
+    assert C.max_output_tokens("deepseek-v3") > 8 * 1024
+    # An unknown model must not make the listing fail.
+    assert C.max_output_tokens("no-such-model") == C.DEFAULT_MAX_OUTPUT
+
+
+def test_the_model_listing_carries_max_tokens(monkeypatch):
+    """Clients size their output budget from this key; it used to be absent."""
+    gateway = _gw()
+    monkeypatch.setattr(gateway, "_acquire", lambda model="": (object(), _Catalogue()))
+    listing = gateway.models(refresh=True)
+    by_id = {item["id"]: item for item in listing["data"]}
+    assert by_id["m1"]["max_tokens"] == 128 * 1024          # unknown → default
+    assert by_id["deepseek-v4.1-flash"]["max_tokens"] == 384 * 1024
+
+
+class _Catalogue:
+    """Two models, one with a known output figure and one without."""
+
+    def models(self):
+        return {"models": [{"modelCode": "m1"}, {"modelCode": "deepseek-v4.1-flash"}],
+                "available": []}

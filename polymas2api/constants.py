@@ -22,6 +22,9 @@ __all__ = [
     "SSE_EVENT_DEEP_RAG",
     "MODEL_CONTEXT_LENGTHS",
     "DEFAULT_CONTEXT_LENGTH",
+    "MODEL_MAX_OUTPUT",
+    "DEFAULT_MAX_OUTPUT",
+    "max_output_tokens",
 ]
 
 #: Base URL of every business endpoint.
@@ -122,6 +125,42 @@ SSE_EVENT_DEEP_RAG = "DEEP_RAG_REASONING"
 #:
 #: A wrong value here does not corrupt anything; it moves the point where a
 #: client decides to compact. Keys are matched case-insensitively.
+#: Maximum output per model, from the vendors' own documentation (checked
+#: 2026-11-27). The platform does not enforce these — measured on deepseek-v3,
+#: whose vendor limit is 8,192 yet which produced 88,932 tokens of thinking
+#: before the probe's own 30-minute cap stopped it (docs/LIMITS.md 13). They are
+#: published here so a client can size its own budget; nothing upstream reads
+#: them (the platform ignores ``max_tokens`` entirely — docs/LIMITS.md 2).
+MODEL_MAX_OUTPUT = {
+    # DeepSeek: 384K per api-docs.deepseek.com/quick_start/pricing for
+    # DeepSeek-V4.1-Flash-1017, which is what deepseek-v4.1-flash resolves to.
+    "deepseek-v4.1-flash": 384 * 1024,
+    # The vendor caps V3 at 8K, but the platform does not: 88,932 tokens came
+    # back in one turn. Declaring 8K would make clients truncate themselves, so
+    # this one carries its own context length instead — an output cannot exceed
+    # the window anyway.
+    "deepseek-v3": 131072,
+    # Qwen, per help.aliyun.com/zh/model-studio/text-generation-model.
+    "qwen3.8-max": 128 * 1024,
+    "qwen3.8-flash": 128 * 1024,
+    "qwen3.6-plus": 64 * 1024,
+    # Not listed in the vendor's table; same generation as qwen3.8-max, so the
+    # family figure is used (inferred, not read).
+    "qwen3.7-max": 128 * 1024,
+    # Doubao Seed 2.x: 128K per the Ark documentation, checked via a mirror of
+    # the model table because the official page renders client-side.
+    "Doubao-Seed-2.1-pro": 128 * 1024,
+    "Doubao-Seed-2.0-pro": 128 * 1024,
+    "Doubao-Seed-2.0-mini": 128 * 1024,
+    "Doubao-Seed-2.1-turbo": 128 * 1024,
+    "Doubao-Seed-1.8": 128 * 1024,
+    "doubao-seed-evolving": 128 * 1024,
+}
+
+#: Used for a model missing from the table (a new platform model, say).
+DEFAULT_MAX_OUTPUT = 128 * 1024
+
+
 MODEL_CONTEXT_LENGTHS = {
     "deepseek-v4.1-flash": 1000000,
     "deepseek-v3": 131072,
@@ -142,3 +181,6 @@ MODEL_CONTEXT_LENGTHS = {
 #: 1,600,000 (docs/LIMITS.md §1), so 1M is the declared working figure.
 DEFAULT_CONTEXT_LENGTH = 1000000
 
+def max_output_tokens(model: str) -> int:
+    """Declared maximum output for one model, per the vendor's own figures."""
+    return MODEL_MAX_OUTPUT.get(model or "", DEFAULT_MAX_OUTPUT)
