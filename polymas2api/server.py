@@ -818,6 +818,9 @@ class Gateway:
         # estimate, which needs the actual mixture of CJK and Latin.
         reasoning_text: List[str] = []
         content_text: List[str] = []
+        #: CALL lines are stripped from what the client receives, but they are
+        #: generated text and belong in ``completion_tokens`` (2026-11-26).
+        call_arguments: List[str] = []
         error = ""
         used_tools: List[str] = []
         effective = model if model and model.lower() != "auto" else self._effective_model()
@@ -874,6 +877,9 @@ class Gateway:
                     chunk["model"] = effective
                 self._audit_upstream_tool(chunk, used_tools)
                 delta = chunk["choices"][0]["delta"]
+                for call in delta.get("tool_calls") or []:
+                    call_arguments.append(
+                        (call.get("function") or {}).get("arguments") or "")
                 if delta.get("reasoning_content"):
                     reasoning_text.append(delta["reasoning_content"])
                     reasoning += len(delta["reasoning_content"])
@@ -946,7 +952,8 @@ class Gateway:
             self._record(account, model, prompt,
                          {"reasoning": reasoning, "content": content, "error": error,
                           "usage": usage_for(prompt, "".join(content_text),
-                                             "".join(reasoning_text))},
+                                             "".join(reasoning_text),
+                                             "".join(call_arguments))},
                          started, True, used_tools,
                          aborted=bool(client_gone is not None and client_gone.is_set()),
                          ttft_ms=int(first_at * 1000), max_gap_ms=int(max_gap * 1000))

@@ -69,15 +69,24 @@ def estimate_tokens(text: str) -> int:
     return int(round(cjk + other / 4.0))
 
 
-def usage_for(prompt: str, content: str, reasoning: str = "") -> Dict[str, Any]:
+def usage_for(prompt: str, content: str, reasoning: str = "",
+              tool_arguments: str = "") -> Dict[str, Any]:
     """An OpenAI ``usage`` block built from the texts we actually sent and got.
 
     ``reasoning`` counts toward ``completion_tokens``: the platform generates
     it, so it costs the same even though the client never sees it. The extra
     ``estimated`` flag is ours — standard clients ignore unknown keys.
+
+    ``tool_arguments`` counts too, for the same reason: a CALL line is
+    generated text. The non-streaming path has always measured before stripping
+    it, but the streaming path measured only what reached the client, and
+    ``ToolCallStream`` withholds the CALL line — so a file-write turn reported
+    none of its arguments. Measured 2026-11-26: one 6,615-character SVG
+    argument is 2,619 tokens, an entire turn's completion budget.
     """
     prompt_tokens = estimate_tokens(prompt)
-    completion_tokens = estimate_tokens(content) + estimate_tokens(reasoning)
+    completion_tokens = (estimate_tokens(content) + estimate_tokens(reasoning)
+                         + estimate_tokens(tool_arguments))
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,

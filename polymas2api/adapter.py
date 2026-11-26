@@ -142,8 +142,13 @@ class OpenAIAdapter:
                 sent_reasoning.append(tail)
                 yield self._chunk(model, delta={"role": "assistant", "reasoning_content": tail})
 
+        # The CALL line is withheld from ``sent_content``, so its arguments
+        # have to be added back for the count to match what was generated.
+        call_arguments = "".join(
+            ((call.to_openai(0).get("function") or {}).get("arguments") or "")
+            for call in calls)
         usage = usage_for(prompt, "".join(sent_content),
-                          "".join(sent_reasoning))
+                          "".join(sent_reasoning), call_arguments)
         if calls:
             # Space the frames out. One millisecond is enough for a client that
             # drops bursted SSE frames to lose one of them, and a lost tool-call

@@ -2711,3 +2711,50 @@ def test_a_failed_renewal_falls_back_to_one_model_without_looping(monkeypatch):
     assert result["data"][0]["polymas"]["source"] == "fallback"
     assert seen["renewals"] == 1
     assert seen["models"] == 1, "one retry attempt, not a loop"
+
+
+# -- tool-call arguments are generated text, so they cost completion tokens --
+
+
+def test_usage_counts_tool_arguments():
+    from polymas2api.tokens import usage_for
+
+    without = usage_for("p", "answer", "thinking")
+    with_args = usage_for("p", "answer", "thinking", "x" * 400)
+    assert with_args["prompt_tokens"] == without["prompt_tokens"]
+    assert with_args["completion_tokens"] > without["completion_tokens"]
+    assert (with_args["completion_tokens"] - without["completion_tokens"]
+            == round(400 / 4.0))
+
+
+def test_streamed_tool_arguments_reach_the_recorded_usage(monkeypatch):
+    """A CALL line never reaches the client, but it was still generated.
+
+    The non-streaming path always counted it (it measures before stripping);
+    the streaming path measured only what it sent out, so a file-write turn
+    reported none of its argument tokens.
+    """
+    from polymas2api.tokens import estimate_tokens
+
+    gateway = _gw()
+    captured = {}
+
+    class _Caller:
+        def stream(self, client, prompt, *, model="", session_id="", tools=None,
+                   overrides=None):
+            yield _chunk({"content": "我来写。"})
+            yield _chunk({"tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {"name": "pwsh",
+                             "arguments": '{"command": "' + "x" * 400 + '"}'}}]})
+            yield _chunk({}, "tool_calls")
+
+    gateway.adapter = lambda client, names=None: _Caller()
+    monkeypatch.setattr(gateway, "_record",
+                        lambda *args, **kwargs: captured.update(args[3]))
+    list(gateway._stream_with_journal(_Account(), None, "p", "m", "s",
+                                      TOOLS_ONE, ["pwsh"]))
+
+    usage = captured["usage"]
+    assert usage["completion_tokens"] >= estimate_tokens("x" * 400), \
+        "the withheld CALL arguments must still be counted"
