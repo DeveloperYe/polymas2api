@@ -29,13 +29,28 @@ __all__ = ["UpstreamError", "PolymasClient", "parse_sse"]
 class UpstreamError(Exception):
     """The platform answered with an error object instead of a stream."""
 
-    def __init__(self, message: str, *, code: Optional[int] = None, trace_id: str = "",
+    def __init__(self, message: str, *, code: Optional[object] = None, trace_id: str = "",
                  account: str = ""):
         super().__init__(message)
         self.code = code
         self.trace_id = trace_id
         self.account = account
 
+
+
+def _platform_busy_text(text: object) -> bool:
+    """Whether one ANSWER is the platform's canned overload reply.
+
+    Matched on the whole answer, not on a substring: a legitimate reply may
+    quote the sentence back (a user asking what it means), and turning that into
+    an error would be worse than passing it through.
+    """
+    if not isinstance(text, str):
+        return False
+    compact = "".join(text.split()).replace("~", "")
+    if not compact or len(compact) > 40:
+        return False
+    return any(marker in compact for marker in C.PLATFORM_BUSY_MARKERS)
 
 def parse_sse(raw: str) -> Iterator[Tuple[str, str]]:
     """Yield ``(event, data)`` pairs from a chunk of SSE text.
@@ -693,4 +708,13 @@ class PolymasClient:
                                    account=self._key)
             if event == C.SSE_EVENT_FINISHED:
                 self.last_stream_finished = True
+            if event == C.SSE_EVENT_ANSWER and _platform_busy_text(
+                    payload.get("text") if isinstance(payload, dict) else None):
+                # Turning this into an error is the whole point of matching it:
+                # the sentence carries no code, so a client would otherwise show
+                # "服务器开小差了" as the model's answer (docs/LIMITS.md 1).
+                raise UpstreamError(
+                    "the platform answered with its overload text "
+                    "(请求过大或预填充超时): 服务器开小差了",
+                    code="platform_busy", trace_id=trace, account=self._key)
             yield event, payload

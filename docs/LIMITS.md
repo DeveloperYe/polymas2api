@@ -46,6 +46,12 @@
 
 > ⚠️ 这段文字**不带错误码**。任何按 HTTP 状态码判断"是否成功"的逻辑都会把它当成正常回答。
 > 网关侧应当匹配这句话并转成错误，否则客户端拿到的是"200 + 无意义内容"。
+>
+> **2026-11-26 已实现**：`constants.PLATFORM_BUSY_MARKERS` + `upstream._platform_busy_text()`
+> 做整句匹配（去掉空白与 `~`、长度 ≤40，避免误伤"引用这句话来解释"的正常回答），命中即抛
+> `UpstreamError(code="platform_busy")`，走既有错误路径。线上实测：200 万字符的请求在 67.7 秒后
+> 收到 `data: {"message": "...服务器开小差了", "type": "upstream_error"}` 而不是那段话术；
+> 账号只被记为「瞬时失败」、仍在轮转中（`pool.report_failure` 不把它当凭证问题）。
 
 ### 1.1 上限按 token 算，不按字符算
 

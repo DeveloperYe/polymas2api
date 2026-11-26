@@ -2758,3 +2758,37 @@ def test_streamed_tool_arguments_reach_the_recorded_usage(monkeypatch):
     usage = captured["usage"]
     assert usage["completion_tokens"] >= estimate_tokens("x" * 400), \
         "the withheld CALL arguments must still be counted"
+
+
+# -- the platform's overload reply carries no error code, so match the words --
+
+
+def test_the_platform_overload_text_is_recognised():
+    from polymas2api.upstream import _platform_busy_text
+
+    assert _platform_busy_text("非常抱歉，服务器开小差了~~~，请稍后重试。")
+    assert _platform_busy_text("  服务暂时开小差了  ")
+    # A legitimate answer that merely quotes the sentence must pass through.
+    assert not _platform_busy_text(
+        "我在解释：服务器开小差了这句话是平台超时时的返回，客户端应该把它当错误处理，"
+        "不要直接展示给用户。")
+    assert not _platform_busy_text(None)
+    assert not _platform_busy_text("")
+
+
+def test_a_busy_answer_becomes_an_upstream_error():
+    """Otherwise the client shows 「服务器开小差了」 as the model's answer."""
+    from polymas2api.upstream import PolymasClient, UpstreamError
+
+    cfg = Config()
+    cfg.biz_code = "hike_teach_center"
+    cfg.opt_platform = "Web"
+    client = PolymasClient(cfg, Credential(uid="t", ai_poly="token", jt_cas="",
+                                           user_nid="u", friend_nid="f"))
+    client._stream_post = lambda path, body, timeout: iter([
+        ("ANSWER", json.dumps({"event": "ANSWER",
+                               "text": "非常抱歉，服务器开小差了~~~，请稍后重试。"})),
+    ])
+    with pytest.raises(UpstreamError) as excinfo:
+        list(client.chat("hi"))
+    assert excinfo.value.code == "platform_busy"

@@ -75,6 +75,12 @@ DEFAULT_FRIEND_NID = "AgEnTnId01"
 #: Business code that scopes the assistant to the teaching centre.
 DEFAULT_BIZ_CODE = "hike_teach_center"
 
+#: The platform's canned reply when a request is too large or the prefill times
+#: out. It arrives as a *normal* ``ANSWER`` with no error code and no HTTP
+#: failure, so anything that trusts the status code treats a dead turn as a
+#: successful one (docs/LIMITS.md 1: measured at ~1M tokens, 54-80 s).
+PLATFORM_BUSY_MARKERS = ("服务器开小差了", "服务暂时开小差了")
+
 SSE_EVENT_ANSWER = "ANSWER"
 SSE_EVENT_REASONING = "REASONING"
 SSE_EVENT_FINISHED = "ALL_FINISHED"
