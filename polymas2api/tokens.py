@@ -52,6 +52,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict
 
+from . import tokencount
+
 __all__ = ["estimate_tokens", "usage_for"]
 
 #: CJK ideographs, kana and hangul — the ranges that average ~1 token/char.
@@ -69,8 +71,23 @@ def estimate_tokens(text: str) -> int:
     return int(round(cjk + other / 4.0))
 
 
+def _count(text: str, model: str) -> tuple:
+    """Exact count when a vocabulary can supply one, else the estimate.
+
+    Returns ``(tokens, exact)``. ``tokencount`` answers ``None`` whenever it
+    cannot help (no package, no vocabulary, an unreadable file), and that is
+    the only case where the heuristic is used.
+    """
+    if not text:
+        return 0, True              # an empty field is exactly zero tokens
+    exact = tokencount.count(text, model)
+    if exact is not None:
+        return exact, True
+    return estimate_tokens(text), False
+
+
 def usage_for(prompt: str, content: str, reasoning: str = "",
-              tool_arguments: str = "") -> Dict[str, Any]:
+              tool_arguments: str = "", model: str = "") -> Dict[str, Any]:
     """An OpenAI ``usage`` block built from the texts we actually sent and got.
 
     ``reasoning`` counts toward ``completion_tokens``: the platform generates
@@ -83,13 +100,23 @@ def usage_for(prompt: str, content: str, reasoning: str = "",
     ``ToolCallStream`` withholds the CALL line — so a file-write turn reported
     none of its arguments. Measured 2026-11-26: one 6,615-character SVG
     argument is 2,619 tokens, an entire turn's completion budget.
+
+    ``model`` selects the vocabulary: the three vendors tokenize the same text
+    differently (2026-11-26: up to 27% apart), so a Qwen turn must not be
+    counted with DeepSeek's merges. An unknown or empty model falls back to the
+    default vendor inside :mod:`polymas2api.tokencount`.
     """
-    prompt_tokens = estimate_tokens(prompt)
-    completion_tokens = (estimate_tokens(content) + estimate_tokens(reasoning)
-                         + estimate_tokens(tool_arguments))
+    prompt_tokens, exact_prompt = _count(prompt, model)
+    content_tokens, exact_content = _count(content, model)
+    reasoning_tokens, exact_reasoning = _count(reasoning, model)
+    argument_tokens, exact_arguments = _count(tool_arguments, model)
+    completion_tokens = content_tokens + reasoning_tokens + argument_tokens
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,
-        "estimated": True,
+        # False only when every part came from a real vocabulary; the flag is
+        # ours, and a client that shows it can tell "measured" from "guessed".
+        "estimated": not (exact_prompt and exact_content and exact_reasoning
+                          and exact_arguments),
     }

@@ -189,6 +189,14 @@ class Config:
     #: frame arrives at p50 4.0 s, p95 5.5 s, so five seconds is free for
     #: ordinary turns and still catches immediate failures).
     header_delay_seconds: float = 5.0
+
+    #: ``auto`` counts with the vendors' vocabularies when they are installed
+    #: and present, ``estimate`` never does. See :mod:`polymas2api.tokencount`.
+    token_counting: str = "auto"
+
+    #: Where those vocabularies live (``deepseek.json`` / ``qwen.json`` /
+    #: ``doubao.json``), relative to the working directory.
+    tokenizers_dir: str = "models/tokenizers"
     tool_stream_buffer_chars: int = 240
 
     #: How long a held answer may stay invisible before it is released anyway.
@@ -304,7 +312,7 @@ def load_config(path: str) -> Config:
         
     "persona_scrub_names",
     "tool_bridge", "expose_upstream_tools", "session_isolation",
-    "header_delay_seconds", "tool_frame_gap_ms", "tool_name_style", "tool_schema_depth", "tool_retry",
+    "header_delay_seconds", "token_counting", "tokenizers_dir", "tool_frame_gap_ms", "tool_name_style", "tool_schema_depth", "tool_retry",
         "tool_stream_buffer_chars",
         "tool_stream_hold_seconds",
         "renew_interval_minutes",

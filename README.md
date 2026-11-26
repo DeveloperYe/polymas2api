@@ -397,8 +397,12 @@ agent，它会直接喊出来。在「设置 → 名字清洗 → 抹掉的名�
 
 ## 已知限制
 
-- **`usage` 是估算值** —— 平台完全不返回 token 用量，网关按字符数估算
-  （中文≈1 token/字、拉丁≈4 字符/token），并在 `usage` 里带 `"estimated": true`。
+- **`usage` 分两种** —— 平台完全不返回 token 用量，数字由网关自己算：
+  装了 `tokenizers` 且 `models/tokenizers/` 里有对应厂商词表时，**按真实 BPE 精确计数**
+  （`"estimated": false`，按模型名自动选 DeepSeek / Qwen / 豆包词表）；
+  否则退回字符估算（中文≈1 token/字、拉丁≈4 字符/token，`"estimated": true`）。
+  词表用 `python tools/fetch_tokenizers.py` 下载（约 30 MB，不进仓库），
+  不装也能正常跑，只是数字变估算。
 - **`id` 恒为 `chatcmpl-polymas`** —— 平台不返回请求 id。
 - **模型可以切换，但人格跟着变** —— 本项目的 agent 认 `model`（`modelName`）字段，
   传别的 `modelCode` 真会换模型；代价是人格与护栏也会变（实测 `qwen3.8-max` 会漏出

@@ -31,6 +31,7 @@ from .journal import Journal, JournalEntry
 from . import agent_persona
 from .persona import NameScrubber
 from .tokens import usage_for
+from . import tokencount
 from .toolbridge import SCHEMA_DEPTH, build_tool_prompt, declared_names
 from .pool import Credential, CredentialPool, PoolError, credential_rejected
 from .renewal import RenewalError, TokenRenewer, fetch_token
@@ -251,6 +252,14 @@ class Gateway:
         self._renew_timer: Optional[threading.Timer] = None
         self._renew_stop = threading.Event()
         self._schedule_renewal()
+        # Counting exactly changes every number reported to a client, so the
+        # choice is logged once at start-up rather than left implicit.
+        if getattr(cfg, "token_counting", "auto") == "estimate":
+            self._token_status = tokencount.configure(None, enabled=False)
+        else:
+            self._token_status = tokencount.configure(
+                getattr(cfg, "tokenizers_dir", "models/tokenizers"))
+        self.log(self._token_status)
 
     # -- credential renewal -------------------------------------------------
     def _schedule_renewal(self) -> None:
@@ -954,7 +963,8 @@ class Gateway:
                          {"reasoning": reasoning, "content": content, "error": error,
                           "usage": usage_for(prompt, "".join(content_text),
                                              "".join(reasoning_text),
-                                             "".join(call_arguments))},
+                                             "".join(call_arguments),
+                                             model=effective)},
                          started, True, used_tools,
                          aborted=bool(client_gone is not None and client_gone.is_set()),
                          ttft_ms=int(first_at * 1000), max_gap_ms=int(max_gap * 1000))

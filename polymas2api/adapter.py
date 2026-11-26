@@ -148,7 +148,8 @@ class OpenAIAdapter:
             ((call.to_openai(0).get("function") or {}).get("arguments") or "")
             for call in calls)
         usage = usage_for(prompt, "".join(sent_content),
-                          "".join(sent_reasoning), call_arguments)
+                          "".join(sent_reasoning), call_arguments,
+                          model=model)
         if calls:
             # Space the frames out. One millisecond is enough for a client that
             # drops bursted SSE frames to lose one of them, and a lost tool-call
@@ -255,7 +256,7 @@ class OpenAIAdapter:
             return {"error": {"message": error_message, "type": "upstream_error"}}
 
         # Count before the CALL line is stripped: it is generated text too.
-        usage = usage_for(prompt, content, reasoning)
+        usage = usage_for(prompt, content, reasoning, model=model)
 
         calls: List[Any] = []
         # Measured on the text as it arrived: once a call parses, the line is

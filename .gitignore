@@ -18,3 +18,6 @@ __pycache__/
 build/
 dist/
 .venv/
+
+# Vendor vocabularies (7-30 MB, fetched by tools/fetch_tokenizers.py)
+models/tokenizers/

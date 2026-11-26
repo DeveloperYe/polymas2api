@@ -20,6 +20,23 @@ from polymas2api.sanitize import Sanitizer
 from polymas2api.upstream import _ChunkedDecoder, parse_sse
 
 
+@pytest.fixture(autouse=True)
+def _estimate_only():
+    """Keep this module on the character heuristic.
+
+    Constructing a Gateway turns exact counting on when the vocabularies are
+    installed, and that would silently rewrite the numbers the usage tests here
+    assert. Exact counting has its own tests in tests/test_tokencount.py.
+    """
+    from polymas2api import tokencount
+
+    tokencount.configure(None, enabled=False)
+    try:
+        yield
+    finally:
+        tokencount.configure(None, enabled=False)
+
+
 # -- SSE parsing ------------------------------------------------------------
 def test_parse_sse_reads_event_and_data():
     frames = list(parse_sse("event:ANSWER\ndata:{\"text\":\"hi\"}\n\n"))
@@ -1277,10 +1294,14 @@ def _result(content="", tool_calls=None, upstream_tools=None, finish="stop"):
 
 
 def _gw():
+    from polymas2api import tokencount
     from polymas2api.server import Gateway
 
     gateway = Gateway(Config())
     gateway.log = lambda message: None
+    # The usage tests below assert the character heuristic's arithmetic; exact
+    # counting is covered by tests/test_tokencount.py.
+    tokencount.configure(None, enabled=False)
     return gateway
 
 

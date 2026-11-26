@@ -347,6 +347,13 @@
 
 ### 8.6 2026-11-26 复测：用**官方分词器**当基准，结论被推翻一次
 
+> **2026-11-26 已把精确计数接进项目**：新增 `polymas2api/tokencount.py`，
+> `usage_for()` 改为优先按厂商词表计数（`tokenizers` + `models/tokenizers/*.json`），
+> 拿不到时自动退回字符估算，`usage.estimated` 如实反映用的是哪一种。
+> 线上实测同一句中文：DeepSeek 24 / Qwen 28 / 豆包 26，而旧估算给的是 **40**。
+> 词表由 `tools/fetch_tokenizers.py` 下载（30 MB，不进仓库）。
+
+
 上一版这节的数字（生产形态 −0.6%）**是错的**，来源是 `tools/probe_tokenizer.py` 那份纯 Python
 BPE 复现——它的说明里就写着「拉丁/标点那一段是近似」。用它当基准，ASCII 密集的工具块被
 **多算了约 40%**，正好掩盖了我们自己的高估。
