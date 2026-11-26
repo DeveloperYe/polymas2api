@@ -565,3 +565,71 @@ baseline = usage !== null && usageTokens(usage) >= estimatedAnchorTokens
 * 把窗口放大到真实容量 → 也能用，但我们**没有测到真正的上限**（1.15M 时先超时了）。
 
 结论：**照平台声明的值上报即可**，不要自己放大——它是下界，安全方向。
+
+---
+
+## 11. 中途报错为什么客户端看不见（2026-11-26 实测 + 修复）
+
+### 11.1 现象：所有中途错误都变成「空回复」
+
+网关**先发 HTTP 200** 再去调上游，所以此后的一切失败只能塞进 SSE 流里。而客户端
+（`@earendil-works/pi-ai` 的 `openai-completions`）是这么读的：
+
+```js
+const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+if (!choice) continue;
+```
+
+我们的错误帧是扁平的 `{"message": ..., "type": "upstream_error"}`，**没有 `choices`**，
+于是被整帧丢弃；而且该文件**从不读 `chunk.error`**。结果：
+
+```
+任何中途失败 → 流正常结束 → stopReason "stop" + 无内容
+            → dsh-llm-pi-ai 判为 EMPTY_RESPONSE
+            → 用户看到「模型什么都没说」，真实原因丢失
+```
+
+### 11.2 影响面：连不该重试的错误也在重试
+
+`DEFAULT_RETRYABLE_CODES = [EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]`
+—— **`EMPTY_RESPONSE` 在名单里**。所以现状是：
+
+| 真实错误 | 本该分类 | 现状 |
+|---|---|---|
+| 超时 / 5xx / 429 | TIMEOUT / SERVER / RATE_LIMIT | 空回复 → 重试（结果正确，原因丢失） |
+| **凭证失效** | AUTH（不该重试） | 空回复 → **无脑重试 3 次** |
+| **额度用尽** | QUOTA（不该重试） | 同上 |
+
+### 11.3 修复：首帧之前不发响应头
+
+改成**先等第一帧（最多 `header_delay_seconds`，默认 5 秒）**再决定状态码：
+
+* 首帧之前失败 → 直接回 **502 / 503 + 错误 JSON**（凭证、账号池、上游 5xx 都属于这类），
+  客户端走标准 HTTP 错误路径，分类与重试策略全部正确；
+* 首帧正常 → 照旧发 200 开始流式；
+* 5 秒内没动静 → 照旧发 200（长预填充不受影响）。
+
+5 秒这个数来自生产数据（`logs/requests.jsonl`，61 条有 ttft 的记录）：
+
+```
+首帧耗时 p50 4.0 s / p90 5.2 s / p95 5.5 s / max 14.9 s
+```
+
+也就是说普通对话本来就要等约 4 秒才出字，**首发头延迟没有增加用户感知延迟**；
+客户端侧的容忍度也不是问题（`dsh-llm-pi-ai` 的 `streamIdleTimeoutMs` 默认 300 秒）。
+
+实测（隔离实例，账号文件为空）：
+
+```
+POST /v1/chat/completions (stream=true)
+→ HTTP 503  {"error": {"message": "no enabled account is available", "type": "no_account"}}
+```
+
+生产实测（改动后）：响应头 2.64 s、首帧 2.64 s、结束 3.26 s、41 个分片——与改动前一致。
+
+### 11.4 仍未解决：真正的「中途」失败
+
+流已经开始之后再出错（例如长回答跑到一半上游断），响应头早已发出，无法再改状态码。
+这类只能继续走错误帧，对 pi-ai 依然不可见。彻底解决需要客户端配合（或改用
+`finish_reason` 承载分类，但那会让所有中途错误落到 `PI_AI_ERROR`、**失去自动重试**，
+见 §11.2 的取舍）。

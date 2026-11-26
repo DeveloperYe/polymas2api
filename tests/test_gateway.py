@@ -2792,3 +2792,91 @@ def test_a_busy_answer_becomes_an_upstream_error():
     with pytest.raises(UpstreamError) as excinfo:
         list(client.chat("hi"))
     assert excinfo.value.code == "platform_busy"
+
+
+# -- a failure before the first frame is an HTTP error, not a silent answer --
+
+
+def _post_json(server, path, payload, key):
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.port}{path}",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {key}"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, error.read()
+
+
+def _streaming_gateway(script):
+    from polymas2api.config import Config
+    from polymas2api.server import Gateway
+
+    gateway = Gateway(Config())
+    gateway.log = lambda message: None
+    gateway.cfg.api_key = "testkey"
+    def _stream():
+        yield from script
+
+    gateway.chat_completions_stream = lambda body, gone=None: _stream()
+    return gateway
+
+
+BODY_ONE_TURN = {"model": "m",
+                 "messages": [{"role": "user", "content": "hi"}],
+                 "stream": True}
+
+
+def test_an_early_upstream_failure_answers_502():
+    """A failure before any frame must reach the client as a status code.
+
+    Clients decide whether to retry from the HTTP result; an error frame inside
+    a 200 stream is invisible to pi-ai, which drops every frame without
+    ``choices`` (measured 2026-11-26 — this is why every such failure used to
+    surface as "the model said nothing").
+    """
+    gateway = _streaming_gateway([
+        {"error": {"message": "boom", "type": "upstream_error"}}])
+    server = _PanelServer(gateway)
+    try:
+        status, body = _post_json(server, "/v1/chat/completions", BODY_ONE_TURN,
+                                  "testkey")
+        assert status == 502
+        assert json.loads(body)["error"]["message"] == "boom"
+    finally:
+        server.close()
+
+
+def test_an_early_account_failure_answers_503():
+    gateway = _streaming_gateway([
+        {"error": {"message": "没有可用的助手", "type": "no_account"}}])
+    server = _PanelServer(gateway)
+    try:
+        status, body = _post_json(server, "/v1/chat/completions", BODY_ONE_TURN,
+                                  "testkey")
+        assert status == 503
+        assert "没有可用的助手" in body.decode("utf-8")
+    finally:
+        server.close()
+
+
+def test_a_normal_turn_still_streams_200():
+    gateway = _streaming_gateway([{
+        "id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+        "choices": [{"index": 0, "delta": {"content": "hi"},
+                     "finish_reason": None}]}])
+    server = _PanelServer(gateway)
+    try:
+        status, body = _post_json(server, "/v1/chat/completions", BODY_ONE_TURN,
+                                  "testkey")
+        assert status == 200
+        assert body.startswith(b"data: ")
+        assert b"[DONE]" in body
+    finally:
+        server.close()

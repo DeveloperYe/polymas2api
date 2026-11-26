@@ -1628,6 +1628,7 @@ class Gateway:
             # 放到 999 会退回 113K 字符的完整展开，负数会退化成平铺。
             "tool_schema_depth": (0, 6),
             "tool_frame_gap_ms": (0.0, 200.0),
+        "header_delay_seconds": (0.0, 120.0),
         }
         for key, (low, high) in bounds.items():
             if key not in applied:
@@ -2036,13 +2037,6 @@ class Handler(BaseHTTPRequestHandler):
         happen until the next frame arrived — measured 2026-11-18: 71 seconds
         of silence, then WinError 10053 surfaced as an unhandled 500.
         """
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
-        self._security_headers()
-        self.end_headers()
-
         gone = threading.Event()
         upstream = self.gateway.chat_completions_stream(body, gone)
         chunks: "queue.Queue[Any]" = queue.Queue(maxsize=64)
@@ -2077,33 +2071,84 @@ class Handler(BaseHTTPRequestHandler):
                 # tears down the upstream socket promptly.
                 try:
                     upstream.close()
-                except (RuntimeError, ValueError):
+                except Exception:                            # noqa: BLE001
+                    # Anything the iterator raises here must not stop
+                    # ``finished`` from being offered: the reader would then
+                    # wait forever and the client would never see [DONE]
+                    # (found 2026-11-26 with an iterator that had no close()).
                     pass
                 offer(finished)
 
         worker = threading.Thread(target=pump, daemon=True)
         worker.start()
 
+        # Wait a moment for the first frame before committing to 200. A failure
+        # that arrives this early can be a real HTTP error, and it should be:
+        # clients classify and retry by status, while a mid-stream error frame is
+        # invisible to them — pi-ai drops any frame without ``choices``, so every
+        # such failure used to surface as "the model said nothing" (2026-11-26).
+        delay = max(0.0, float(getattr(self.gateway.cfg, "header_delay_seconds", 5.0)))
+        try:
+            first = chunks.get(timeout=delay) if delay > 0 else None
+        except queue.Empty:
+            first = None
+        if isinstance(first, dict) and "error" in first:
+            stop.set()
+            gone.set()
+            payload = first["error"]
+            status = 503 if payload.get("type") == "no_account" else 502
+            self.gateway.log(
+                f"upstream failed before the stream began, answering {status}: "
+                f"{payload.get('message')}")
+            try:
+                self._send_json({"error": payload}, status, close=True)
+            except OSError:
+                pass
+            self._drain(chunks)
+            return
+        if isinstance(first, BaseException):
+            stop.set()
+            gone.set()
+            self.gateway.log(f"upstream failed before the stream began: {first}")
+            try:
+                self._send_json({"error": {"message": str(first),
+                                           "type": "upstream_error"}}, 502, close=True)
+            except OSError:
+                pass
+            self._drain(chunks)
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self._security_headers()
+        self.end_headers()
+
+        pending: List[Any] = [] if first is None else [first]
         last_write = time.time()
         try:
             while True:
-                try:
-                    item = chunks.get(timeout=1.0)
-                except queue.Empty:
-                    if self._client_gone():
-                        stop.set()
-                        gone.set()
-                        self._drain(chunks)
-                        self.gateway.log("client disconnected mid-stream")
-                        return
-                    # A caller with a long upstream pause still deserves to see
-                    # the connection is alive; SSE comments are ignored by
-                    # clients that do not understand them.
-                    if time.time() - last_write >= 15:
-                        self.wfile.write(b": keep-alive\n\n")
-                        self.wfile.flush()
-                        last_write = time.time()
-                    continue
+                if pending:
+                    item = pending.pop()
+                else:
+                    try:
+                        item = chunks.get(timeout=1.0)
+                    except queue.Empty:
+                        if self._client_gone():
+                            stop.set()
+                            gone.set()
+                            self._drain(chunks)
+                            self.gateway.log("client disconnected mid-stream")
+                            return
+                        # A caller with a long upstream pause still deserves to
+                        # see the connection is alive; SSE comments are ignored
+                        # by clients that do not understand them.
+                        if time.time() - last_write >= 15:
+                            self.wfile.write(b": keep-alive\n\n")
+                            self.wfile.flush()
+                            last_write = time.time()
+                        continue
                 if item is finished:
                     break
                 if isinstance(item, BaseException):

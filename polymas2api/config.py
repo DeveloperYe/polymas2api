@@ -181,6 +181,14 @@ class Config:
     #: client drops — it lost a frame and ended up with an empty id or half a
     #: JSON argument. Eight milliseconds is what that project settled on.
     tool_frame_gap_ms: float = 8.0
+
+    #: How long a stream may hold its HTTP headers while waiting for the first
+    #: frame. A failure that arrives inside this window becomes a proper
+    #: 502/503 instead of an error frame the client cannot see; anything slower
+    #: falls back to headers-first streaming (measured 2026-11-26: the first
+    #: frame arrives at p50 4.0 s, p95 5.5 s, so five seconds is free for
+    #: ordinary turns and still catches immediate failures).
+    header_delay_seconds: float = 5.0
     tool_stream_buffer_chars: int = 240
 
     #: How long a held answer may stay invisible before it is released anyway.
@@ -296,7 +304,7 @@ def load_config(path: str) -> Config:
         
     "persona_scrub_names",
     "tool_bridge", "expose_upstream_tools", "session_isolation",
-    "tool_frame_gap_ms", "tool_name_style", "tool_schema_depth", "tool_retry",
+    "header_delay_seconds", "tool_frame_gap_ms", "tool_name_style", "tool_schema_depth", "tool_retry",
         "tool_stream_buffer_chars",
         "tool_stream_hold_seconds",
         "renew_interval_minutes",
