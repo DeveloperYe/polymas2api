@@ -19,14 +19,16 @@ these models use, while Latin text averages around four characters per token.
 That is a rough model, not a tokenizer, and it should never be used to bill
 anyone.
 
-Where it is wrong, measured 2026-11-26 against the vendor vocabulary: Chinese
-*prose* merges common two-character words, so it really runs ~1.85 characters
-per token and this estimate overstates it by 40–80%; code and JSON punctuation
-run close to one token per character and are understated by ~20%. Those two
-errors cancel while a tool block dominates the prompt (measured −0.6% on a
-112-tool block, +0.5% with a conversation attached), which is the shape that
-decides when a client compacts — and a four-feature model fitted to separate
-them did no better out of sample. See docs/LIMITS.md 8.6.
+Where it is wrong, measured 2026-11-26 with the vendor's own tokenizer (the
+`tokenizers` wheel has cp314 builds, so this is exact): a 112-tool block costs
+5,791 tokens against 6,438 estimated (+11.2%), the same block with a Chinese
+conversation +11.7%, and Chinese prose +60 to +83% — the vocabulary merges
+common two-character words, so Chinese really runs ~1.8 characters per token,
+not one. The two errors do *not* cancel as an earlier probe suggested: that
+probe's own approximation over-counted ASCII by ~40%. The consequence is mild
+and always in the same direction — a client that adopts this figure compacts
+slightly early. See docs/LIMITS.md 8.6 for the per-sample table and the cost of
+counting exactly (+32 MB, +0.7 s startup, 18–82 ms per request).
 
 **These numbers are not decorative.** A client that manages its own context
 window stores the reported usage as an anchor and prefers it over its own
