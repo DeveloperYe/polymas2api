@@ -19,6 +19,15 @@ these models use, while Latin text averages around four characters per token.
 That is a rough model, not a tokenizer, and it should never be used to bill
 anyone.
 
+Where it is wrong, measured 2026-11-26 against the vendor vocabulary: Chinese
+*prose* merges common two-character words, so it really runs ~1.85 characters
+per token and this estimate overstates it by 40–80%; code and JSON punctuation
+run close to one token per character and are understated by ~20%. Those two
+errors cancel while a tool block dominates the prompt (measured −0.6% on a
+112-tool block, +0.5% with a conversation attached), which is the shape that
+decides when a client compacts — and a four-feature model fitted to separate
+them did no better out of sample. See docs/LIMITS.md 8.6.
+
 **These numbers are not decorative.** A client that manages its own context
 window stores the reported usage as an anchor and prefers it over its own
 heuristic whenever it is larger — ``dsh-token-meter`` does exactly that:
